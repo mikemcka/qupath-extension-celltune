@@ -96,7 +96,22 @@ Do this **after** §2, so the baseline diff is done against unmodified defaults.
 - [ ] Repeat at 64 if 128 looks acceptable. Keep whichever setting trades time for accuracy in the
       direction you want; there is no correct answer here, only your answer for this panel.
 
-## 8. LightGBM early stopping (the one non-bit-identical change)
+## 8. Auto-tune now tunes the real model
+
+The tuner cross-validated LightGBM without `min_gain_to_split=10` and then applied the winning
+settings to a booster that has it. Both fold evaluators now share the model classes' own parameter
+builders. This **changes auto-tuned results** — it should improve them, since the search is finally
+scoring what gets deployed. Default runs are untouched: the tuner only runs with Auto-tune ticked.
+
+- [ ] Model 2 = LightGBM, **Auto-tune ON**. Train, and note the tuned rounds/depth/rate/subsample
+      the log reports plus the resulting macro-F1.
+- [ ] Compare against an auto-tuned run on the baseline JAR. Expect **different chosen
+      hyperparameters** — that is the fix working, not a regression. What matters is that the
+      macro-F1 does not get worse.
+- [ ] Auto-tune should also be somewhat faster: with `min_gain_to_split` applied, folds run out of
+      worthwhile splits and stop early instead of grinding through every round as no-ops.
+
+## 9. LightGBM early stopping (the one non-bit-identical change)
 
 Early stopping now reads LightGBM's own log-loss instead of a hand-rolled one.
 

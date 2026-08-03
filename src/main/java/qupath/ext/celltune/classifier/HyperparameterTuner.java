@@ -499,19 +499,12 @@ public final class HyperparameterTuner {
             trainMat = new DMatrix(trainData, trainSize, nFeatures, Float.NaN);
             trainMat.setLabel(trainLabels);
 
-            Map<String, Object> params = new LinkedHashMap<>();
-            params.put("max_depth", hp.maxDepth());
-            params.put("eta", (double) hp.eta());
-            params.put("subsample", (double) hp.subsample());
-            params.put("colsample_bytree", 0.8);
-            params.put("objective", nClasses == 2 ? "binary:logistic" : "multi:softprob");
-            params.put("eval_metric", nClasses == 2 ? "logloss" : "mlogloss");
-            params.put("device", "cpu");
-            params.put("tree_method", "hist");
-            params.put("nthread", nThreads);
-            params.put("seed", 42);
+            // Shared with the real fit rather than restated here: cross-validation has to score
+            // the model that will actually be built, and a locally-maintained copy silently stops
+            // matching the moment a parameter is added on the other side.
+            Map<String, Object> params =
+                    XGBoostModel.buildParams(nClasses, hp.maxDepth(), hp.eta(), hp.subsample(), nThreads);
             params.put("verbosity", 0);
-            if (nClasses > 2) params.put("num_class", nClasses);
 
             booster = XGBoost.train(trainMat, params, hp.numRounds(), new LinkedHashMap<>(), null, null);
 
@@ -562,25 +555,19 @@ public final class HyperparameterTuner {
             dataset = LGBMDataset.createFromMat(trainData, trainSize, nFeatures, true, "", null);
             dataset.setField("label", trainLabels);
 
-            StringBuilder sb = new StringBuilder();
-            if (nClasses == 2) {
-                sb.append("objective=binary metric=binary_logloss");
-            } else {
-                sb.append("objective=multiclass metric=multi_logloss num_class=")
-                        .append(nClasses);
-            }
-            sb.append(" max_depth=").append(hp.maxDepth());
-            sb.append(" learning_rate=").append(hp.eta());
-            sb.append(" bagging_fraction=").append(hp.subsample());
-            sb.append(" bagging_freq=1");
-            sb.append(" feature_fraction=0.8");
-            sb.append(" num_threads=").append(nThreads);
-            sb.append(" seed=42");
-            sb.append(" verbosity=-1");
+            // Shared with the real fit rather than restated here. The local copy omitted
+            // min_gain_to_split, so every trial was scored on an unconstrained booster and the
+            // winning depth/rate/subsample was then handed to a constrained one — the tuner was
+            // optimising a model that never got built.
+            String params = LightGBMModel.buildParams(nClasses, hp.maxDepth(), hp.eta(), hp.subsample(), nThreads);
 
-            booster = LGBMBooster.create(dataset, sb.toString());
+            booster = LGBMBooster.create(dataset, params);
             for (int i = 0; i < hp.numRounds(); i++) {
-                booster.updateOneIter();
+                // is_finished — with min_gain_to_split now applied, folds routinely run out of
+                // splits worth making well before numRounds, and every further call is a no-op.
+                if (booster.updateOneIter()) {
+                    break;
+                }
             }
 
             double[] rawPreds =

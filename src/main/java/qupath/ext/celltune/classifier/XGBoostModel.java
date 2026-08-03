@@ -75,14 +75,11 @@ public class XGBoostModel {
             // Dropping it leaves the model bit-identical.
             Map<String, DMatrix> watches = new LinkedHashMap<>();
 
-            // This build pins the CPU-only xgboost4j artifact (see build.gradle.kts:
-            // "ml.dmlc:xgboost4j_2.13"). The CUDA kernels are NOT shipped, so
-            // device=cuda is silently ignored by XGBoost and falls back to CPU
-            // without throwing — which previously caused us to mis-report GPU.
-            // Always train on CPU here. If/when a -gpu artifact is wired in,
-            // restore the probe-and-fallback logic.
-            params.put("device", "cpu");
-            params.put("tree_method", "hist");
+            // device=cpu and tree_method=hist come from buildParams. This build pins the CPU-only
+            // xgboost4j artifact (see build.gradle.kts: "ml.dmlc:xgboost4j_2.13"), whose CUDA
+            // kernels are NOT shipped — device=cuda is silently ignored by XGBoost and falls back
+            // to CPU without throwing, which previously caused us to mis-report GPU. If/when a
+            // -gpu artifact is wired in, restore the probe-and-fallback logic.
             booster = XGBoost.train(trainMat, params, numRounds, watches, null, null);
             logger.info(
                     "XGBoost training: CPU — {} samples, {} features, {} classes, {} rounds",
@@ -205,8 +202,6 @@ public class XGBoostModel {
             valMat.setLabel(valLabels);
 
             Map<String, Object> params = buildParams(nClasses, maxDepth, eta, subsample);
-            params.put("device", "cpu");
-            params.put("tree_method", "hist");
             params.put("verbosity", 0);
 
             booster = XGBoost.train(trainMat, params, 1, new LinkedHashMap<>(), null, null);
@@ -469,6 +464,23 @@ public class XGBoostModel {
     }
 
     private static Map<String, Object> buildParams(int nClasses, int maxDepth, float eta, float subsample) {
+        return buildParams(nClasses, maxDepth, eta, subsample, TrainingThreads.total());
+    }
+
+    /**
+     * The single definition of how an XGBoost booster in this extension is configured.
+     * <p>
+     * {@link HyperparameterTuner} must call this rather than assembling its own map. Its
+     * hand-built copy was equivalent right up until {@code max_bin} was added here — at which
+     * point cross-validation would have scored 256-bin boosters and handed the winner to a
+     * 64-bin one, exactly the bug the LightGBM path already had with
+     * {@code min_gain_to_split}. Model-affecting parameters belong here, where there is one of
+     * them; {@code verbosity} stays at the call sites because it does not touch the model.
+     *
+     * @param nThreads thread budget for this booster; the tuner divides the total across its
+     *                 concurrently-evaluated folds rather than letting each request every core
+     */
+    static Map<String, Object> buildParams(int nClasses, int maxDepth, float eta, float subsample, int nThreads) {
 
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("max_depth", maxDepth);
@@ -477,9 +489,14 @@ public class XGBoostModel {
         p.put("colsample_bytree", 0.8);
         p.put("objective", nClasses == 2 ? "binary:logistic" : "multi:softprob");
         p.put("eval_metric", nClasses == 2 ? "logloss" : "mlogloss");
-        p.put("nthread", TrainingThreads.total());
+        p.put("nthread", nThreads);
         p.put("seed", 42);
         if (nClasses > 2) p.put("num_class", nClasses);
+        // This build pins the CPU-only xgboost4j artifact, and hist is what every measurement in
+        // this extension assumes. Both are model-affecting, so they live here rather than being
+        // re-stated at each call site.
+        p.put("device", "cpu");
+        p.put("tree_method", "hist");
         int bins = maxBin;
         if (bins > 0) p.put("max_bin", bins);
         return p;

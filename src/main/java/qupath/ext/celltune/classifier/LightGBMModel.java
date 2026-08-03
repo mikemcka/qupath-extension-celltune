@@ -491,6 +491,22 @@ public class LightGBMModel {
     // ── Private helpers ─────────────────────────────────────────────────────────
 
     private static String buildParams(int nClasses, int maxDepth, float learningRate, float subsample) {
+        return buildParams(nClasses, maxDepth, learningRate, subsample, TrainingThreads.total());
+    }
+
+    /**
+     * The single definition of how a LightGBM booster in this extension is configured.
+     * <p>
+     * {@link HyperparameterTuner} must call this rather than assembling its own string. It used to
+     * do the latter and omitted {@code min_gain_to_split}, so cross-validation scored unconstrained
+     * boosters and then handed the winning depth/rate/subsample to a constrained one — the tuner
+     * was optimising a model that never got built. Any parameter added here must reach both paths
+     * or the same class of bug comes back.
+     *
+     * @param numThreads thread budget for this booster; the tuner divides the total across its
+     *                   concurrently-evaluated folds rather than letting each request every core
+     */
+    static String buildParams(int nClasses, int maxDepth, float learningRate, float subsample, int numThreads) {
         StringBuilder sb = new StringBuilder();
         if (nClasses == 2) {
             sb.append("objective=binary metric=binary_logloss");
@@ -503,7 +519,7 @@ public class LightGBMModel {
         sb.append(" bagging_freq=1");
         sb.append(" feature_fraction=0.8");
         sb.append(" min_gain_to_split=10");
-        sb.append(" num_threads=").append(TrainingThreads.total());
+        sb.append(" num_threads=").append(numThreads);
         sb.append(" seed=42");
         sb.append(" verbosity=-1"); // suppress LightGBM logs
         return sb.toString();
