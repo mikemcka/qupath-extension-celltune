@@ -49,6 +49,7 @@ Windows and boxes can be expanded or contracted by clicking and dragging corners
     - [13.5 Export Annotation Regions](#135-export-annotation-regions)
     - [13.6 Reset CellTune Project State](#136-reset-celltune-project-state)
 14. [Reference: every setting in the sidebar](#14-reference-every-setting-in-the-sidebar)
+    - [14.1 Reference: preferences](#141-reference-preferences)
 15. [Reference: every CellTune menu item](#15-reference-every-celltune-menu-item)
 16. [Project directory layout](#16-project-directory-layout)
 17. [Image pixel prescreen (whole-image QC)](#17-image-pixel-prescreen-whole-image-qc-no-cells-needed)
@@ -93,7 +94,7 @@ Manual Label Mode  → label ~20–50 cells across the open image
        ↓
 Apply to which images... → choose images to predict on
        ↓
-Set Workers, pick settings (Pool labels, Balancing, Early stopping, etc.)
+Set Images at once, pick settings (Pool labels, Balancing, Early stopping, etc.)
        ↓
 Train  →  inspect Training Metrics + Confusion Matrix
        ↓
@@ -293,9 +294,19 @@ Click **Apply to which images... (N)** above the train button.
 
 This is a quick way to reduce prediction times but only focusing on one or a few images.
 
-### 5.3 Crank up workers (if you have RAM)
+### 5.3 CPU threads and Images at once
 
-**Workers** spinner (1–8). One worker = one full slide loaded into memory at a time. On a 32 GB workstation with COMET-sized slides, 2–3 workers is a sweet spot. On 16 GB, leave at 1.
+![Compute settings: Rounds, Max depth, CPU threads, Images at once](doc_images/classifier_compute_settings.png)
+
+Two speed controls. They do different jobs, so they are separate numbers. (Labels get cut off in a narrow panel — widen it, or hover for the full text.)
+
+**CPU threads — makes training faster.**
+Leave at **0**, which means "use the whole computer". Lower it only if you want to keep working in QuPath while a long training run happens in the background, or if you're sharing a compute node with someone. Your choice is remembered next time.
+
+> One thing to know: changing this number can nudge the results very slightly. Neither setting is more correct. If you're comparing two training runs, just use the same number for both.
+
+**Images at once — makes *applying* the classifier to other images faster.**
+This only matters after training, when the classifier is being applied to the other images you picked. Each image being processed has to be fully loaded, so this uses memory rather than processor. **1** on a 16 GB machine, **2–3** on 32 GB. Maximum 8. If you set it too high, QuPath may run out of memory.
 
 ### 5.4 Pick the right settings
 
@@ -305,8 +316,9 @@ The defaults are tuned for typical multiplex panels. Adjust as follows:
 |---|---|---|---|
 | **Pool labels from all images** | ✅ | (always; auto-on in binary mode) | training a per-image model intentionally |
 | **Enable data balancing** + `SMOTE + Tomek` | ✅ | one class << others (typical multiplex) | classes are already balanced or you want raw counts |
-| **Auto-tune hyperparameters** | ❌ | first/Last build of a new panel; willing to wait | iterating fast; defaults known to work |
+| **Auto-tune hyperparameters** | ❌ | first/last build of a new panel, and you can leave it overnight | iterating fast; defaults known to work |
 | **Early stopping** | ✅ | (always — no downside) | reproducing a paper with a fixed round count |
+| **Train/val metrics** | ✅ | you want the Training Metrics report | iterating fast — it costs about ⅓ of training time |
 | **Show top 10 feature importance** | ✅ | (always — cheap) | reducing UI clutter |
 | **Auto-prune features** | ✅ | (always — non-destructive, faster training) | running a reproducible benchmark |
 | **Restrict to features shared with imported data** | ❌ | merging labels imported from a different panel | training on this project only |
@@ -327,15 +339,41 @@ The defaults are tuned for typical multiplex panels. Adjust as follows:
 
 Defaults work for ~90% of cases. Switch to `SMOTE` alone if Tomek is removing too much real signal; switch to `ADASYN` if a minority class lives in a hard region of feature space.
 
-**Models 1 & 2.** Default pair is **XGBoost + LightGBM**. Random Forest is also available. Keep the two model types **different** — that's the whole point of dual-model disagreement. Auto-tune runs independently per model. Both boosted models (XGBoost, LightGBM) attempt **GPU (CUDA)** training automatically and fall back to CPU if no compatible GPU is present; the training progress dialog reports the device actually used.
+**Train/val metrics.** On by default. This is what fills in the **Training Metrics** report (per-class scores). Producing it means training each model a second time on part of your data, which costs roughly a third of the total training time. Untick it while you're still adding labels and re-tick it for the run you want to keep — your classifier is identical either way, you just don't get the report.
+
+**Auto-tune is slow.** It trains 200 models to search for better settings. On a big panel that's hours, not minutes — plan for overnight. The training log tells you how many it's about to do.
+
+**Models 1 & 2.** Default pair is **XGBoost + LightGBM**. Random Forest is also available. Keep the two model types **different** — that's the whole point of dual-model disagreement. Auto-tune runs independently per model.
+
+**Training uses the CPU, not the graphics card.** Both models report `CPU` in the progress dialog. A GPU wouldn't help at this scale anyway — it only starts to pay off with far more labelled cells than a typical panel has.
 
 **Rounds / Max depth.** Default 200 rounds, depth 6. Together with early stopping, this is almost always enough. Increase rounds to 500 if early stopping is firing very late.
 
 ### 5.5 Train
 
-Click **Train**. A progress dialog shows the current step (feature extraction, balancing, fold training, etc.). Before training starts, a timestamped backup of the label store is written to `<project>/celltune/labels_backup_*.json`. You will receive a notification if you have insufficient memory for training at this time.
+Click **Train**. A progress dialog shows the current step (feature extraction, balancing, fold training, etc.). Before training starts, a timestamped backup of the label store is written to `<project>/celltune/labels_backup_*.json`.
+
+**Before it starts**, CellTune checks whether you have enough memory. If it looks tight, you get a warning with a Proceed/Cancel choice — cancelling now is cheaper than running out of memory twenty minutes in. It's a rough check, so it catches obvious problems rather than guaranteeing success.
 
 Status bar after success: `Training complete — 523 cells classified, 47 disagreements.`
+
+#### The training log file
+
+Every run saves a copy of its log to `<project>/celltune/logs/`. The on-screen log disappears when you close the progress window; this one doesn't, and it survives a crash. The 20 most recent are kept. (Without a project there's nowhere to save it, so training just runs without one.)
+
+The log starts with everything about the run — cell and label counts, every setting you used, your memory — so you can send it to someone without having to explain the setup.
+
+It ends with where the time went, slowest first:
+
+```
+── Where the time went ──────────────────────────────────
+  fit XGBoost                326.61s   45.7%
+  early stop: XGBoost        293.93s   41.1%
+  apply to other images      118.40s    9.2%
+  predict all cells           39.88s    5.6%
+```
+
+Check this first if training feels slow — it tells you which step to actually do something about. If a run fails, the last line names the step it failed on.
 
 ### 5.6 Inspecting the result
 
@@ -1103,14 +1141,16 @@ Deletes the project's entire `celltune/` folder: all labels and per-image label 
 |---|---|---|
 | **Rounds** | 200 | Boosting iterations (50–1000). Increase for complex data; decrease for fast trials. |
 | **Max depth** | 6 | Tree depth (2–15). Higher = more complex interactions, more overfit risk. |
-| **Workers** | 1 | Parallel image-prediction workers (1–8). Each loads a full slide; RAM-bound. |
+| **CPU threads** | 0 (all) | How much of the computer training may use. 0 = all of it. Lower it to keep working while training runs. Remembered between sessions. See §5.3. |
+| **Images at once** | 1 | How many images are classified at once *after* training (1–8). Uses memory, not processor. Doesn't affect training itself. |
 | **Model 1** | XGBoost | First ensemble model. |
 | **Model 2** | LightGBM | Second ensemble model. **Pick a different type** for meaningful disagreement. |
 | **Pool labels from all images** | ✅ | Train on labels from every image; auto-on/locked in binary mode. |
 | **Enable data balancing** | ✅ | Apply resampling. Hides the strategy dropdown when off. |
 | **Strategy** | SMOTE + Tomek | Resampling algorithm — see §5.4 table. |
-| **Auto-tune hyperparameters** | ❌ | TPE Bayesian search per model. Slow but explores rounds/depth/eta/subsample. |
-| **Early stopping** | ✅ | Stop boosting when val loss plateaus (patience 20). |
+| **Auto-tune hyperparameters** | ❌ | Automatically searches for better settings by training **200 models**. Hours on a big panel — plan for overnight. |
+| **Early stopping** | ✅ | Stops training once the model stops improving, so you don't waste time. |
+| **Train/val metrics** | ✅ | Produces the **Training Metrics** report. Costs about a third of training time; untick it to train faster and go without the report. |
 | **Show top 10 feature importance after training** | ✅ | Auto-open SHAP plot after training. |
 | **Auto-prune features** | ✅ | Drop near-constant & redundant features across the pooled, normalised training set before training; the top 5 highest-variance features per group are always kept. Non-destructive. See §[4.1](#41-select-features). |
 | **Restrict to features shared with imported data** | ❌ | Case-insensitive intersection with imported ground-truth columns. |
@@ -1123,6 +1163,30 @@ Deletes the project's entire `celltune/` folder: all labels and per-image label 
 | **Training Metrics** | (disabled) | Per-class precision/recall/F1 on 20% held-out split (≥20 labelled cells). |
 | **Feature Importance...** | (disabled) | SHAP top-N per class. Unlocks after training. |
 | **Enter Review Mode** | (disabled) | Sample disagreement cells for human review. Unlocks after predictions exist. |
+
+### 14.1 Reference: preferences
+
+Under **Edit → Preferences → CellTune Classifier**. These are set once and left alone, which is why they aren't in the sidebar.
+
+| Preference | Default | What it does |
+|---|---|---|
+| **Enable** | ✅ | Turn the extension off without uninstalling it. |
+| **XGBoost histogram bins** | 0 | How finely one model examines each measurement. 0 means "use the standard setting". |
+
+**XGBoost histogram bins — trading a little accuracy for a lot of speed.**
+
+Most of your training time is spent building one of the two models. Lowering this number makes it look at each measurement more coarsely, which is much faster: **128 is about twice as fast, 64 about two and a half times.**
+
+The catch is that it **changes your results**. That's why it's off by default. It isn't simply "faster but worse" — a coarser look can filter out noise, and in testing 64 sometimes scored slightly *better*. But that was on artificial data, so only the speed figures are reliable. You have to try it on your own panel.
+
+If you want to:
+
+1. Train as normal and look at your Training Metrics, then export the cell table.
+2. Set the number to 128 and train again. The log header will show `XGB max_bin: 128`.
+3. Compare the scores, and compare the two exported class columns. Some cells **will** be classified differently — the question is whether it's cells you care about.
+4. If 128 looks fine, try 64.
+
+There's no right answer here, just the trade you're happy with.
 
 ---
 
@@ -1449,7 +1513,8 @@ Each toggle flips back to the classification colouring on a second click, and **
 - **Resolve hierarchy before exporting** We also have noticed a bug where parent annotations are missing for exported cells, ContainingAnnotations will display them correctly.
 - **F1 scores can lie.** A held-out 20% split is honest within an image but optimistic across the project. Always sanity-check on a few unseen slides before believing the metrics.
 - **Pick different model types for Model 1 and Model 2.** Two XGBoosts won't disagree much, which kills the whole point.
-- **Workers spinner caps at 8.** Each worker loads a full slide; expect ~2–4 GB RAM per worker on COMET data.
+- **Images at once caps at 8.** Expect ~2–4 GB of memory per image on COMET data. It's a different thing from **CPU threads** — see §5.3.
+- **If training feels slow, read the log first.** Every run ends with a "Where the time went" table in `<project>/celltune/logs/`. It tells you which step to actually do something about instead of guessing.
 - **The marker table persists per project.** On import it's saved to `<project>/celltune/marker-table.json` and reloaded automatically when you reopen the project, so auto-channel-switching during review survives QuPath restarts — no re-import needed. (*Reset CellTune project state* clears it along with the rest of the `celltune/` folder.)
 - **Project Prediction Summary needs ≥5 images** to give meaningful robust z-scores. On 2–3 image projects, treat the Anomaly column as overview or guide.
 - **Composite class colours.** Without "Prepend primary", QuPath generates a colour per unique composite name — you can end up with hundreds. Tick "Prepend primary" and your existing multi-class palette is preserved.
