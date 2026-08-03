@@ -77,7 +77,26 @@ only valid when the hyperparameters have not moved since, and auto-tune replaces
 - [ ] Re-run with Auto-tune OFF: the "kept the round-N model" line *should* appear, and the
       train/val metrics should be unchanged from a pre-change run.
 
-## 7. LightGBM early stopping (the one non-bit-identical change)
+## 7. XGBoost `max_bin` — a speed/accuracy trade you have to price yourself
+
+XGBoost is ~87% of a training run and `max_bin` is the only remaining lever on it. Off by default
+(Edit → Preferences → CellTune → **XGBoost histogram bins**, 0 = XGBoost's own 256), because
+**it changes predictions**. The benchmark measured 2.0× at 128 bins and 2.6× at 64 on the real
+shape, but on synthetic data — the timing ratios transfer, the accuracy effect does not.
+
+Do this **after** §2, so the baseline diff is done against unmodified defaults.
+
+- [ ] With bins = 0, note the training log's `fit XGBoost` and `early stop: XGBoost` times, the
+      `Macro F1` line, and export the cell table.
+- [ ] Set bins = 128, retrain. Confirm the header records `XGB max_bin: 128` — a log without that
+      line cannot be compared against another.
+- [ ] Expect roughly half the XGBoost time. Compare macro-F1 and diff the exported class column
+      against the bins = 0 export: **predictions will differ** — the question is by how much and
+      whether the disagreements land on cells you care about.
+- [ ] Repeat at 64 if 128 looks acceptable. Keep whichever setting trades time for accuracy in the
+      direction you want; there is no correct answer here, only your answer for this panel.
+
+## 8. LightGBM early stopping (the one non-bit-identical change)
 
 Early stopping now reads LightGBM's own log-loss instead of a hand-rolled one.
 

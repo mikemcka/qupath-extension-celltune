@@ -179,4 +179,100 @@ class XGBoostRoundSearchTest {
                 s -> {});
         assertEquals(search(f, false).bestRounds(), rounds);
     }
+
+    // ── max_bin ─────────────────────────────────────────────────────────────────
+
+    private float[][] trainAndPredict(Fixture f) throws Exception {
+        XGBoostModel m = new XGBoostModel();
+        m.train(
+                f.trainData(),
+                f.trainLabels(),
+                TRAIN_ROWS,
+                N_FEATURES,
+                names("class", N_CLASSES),
+                names("f", N_FEATURES),
+                12,
+                4,
+                0.2f,
+                0.8f);
+        return m.predictProba(f.valData(), VAL_ROWS, N_FEATURES);
+    }
+
+    /**
+     * The whole safety argument for shipping the {@code max_bin} preference is that leaving it
+     * alone changes nothing, so that has to be pinned rather than assumed: {@code 0} must produce
+     * exactly what an explicit 256 does — XGBoost's own default.
+     */
+    @Test
+    @DisplayName("max_bin=0 is XGBoost's default, not a separate setting")
+    void defaultMaxBinIsANoOp() throws Exception {
+        assumeTrue(nativesAvailable, "XGBoost natives unavailable");
+        int original = XGBoostModel.getMaxBin();
+        try {
+            Fixture f = fixture();
+
+            XGBoostModel.setMaxBin(0);
+            float[][] asDefault = trainAndPredict(f);
+            XGBoostModel.setMaxBin(256);
+            float[][] asExplicit256 = trainAndPredict(f);
+
+            for (int i = 0; i < asDefault.length; i++) {
+                assertArrayEquals(asDefault[i], asExplicit256[i], 0f, "row " + i + ": max_bin=0 is not 256");
+            }
+        } finally {
+            XGBoostModel.setMaxBin(original);
+        }
+    }
+
+    /**
+     * The converse: the preference must actually reach XGBoost. Without this, a silently-ignored
+     * setting would look identical to a working default and the speed/accuracy trade-off a user
+     * thinks they made would not exist.
+     */
+    @Test
+    @DisplayName("a lowered max_bin reaches XGBoost and changes the model")
+    void loweredMaxBinChangesTheModel() throws Exception {
+        assumeTrue(nativesAvailable, "XGBoost natives unavailable");
+        int original = XGBoostModel.getMaxBin();
+        try {
+            Fixture f = fixture();
+
+            XGBoostModel.setMaxBin(0);
+            float[][] fine = trainAndPredict(f);
+            XGBoostModel.setMaxBin(4); // far coarser than any sane setting, so the diff is certain
+            float[][] coarse = trainAndPredict(f);
+
+            boolean differs = false;
+            for (int i = 0; i < fine.length && !differs; i++) {
+                for (int c = 0; c < fine[i].length; c++) {
+                    if (fine[i][c] != coarse[i][c]) {
+                        differs = true;
+                        break;
+                    }
+                }
+            }
+            assertTrue(differs, "max_bin=4 predicted identically to the default — the setting is being ignored");
+        } finally {
+            XGBoostModel.setMaxBin(original);
+        }
+    }
+
+    /** Guards the clamp: XGBoost rejects fewer than 2 bins, and negatives mean "default". */
+    @Test
+    @DisplayName("max_bin is clamped to a value XGBoost accepts")
+    void maxBinIsClamped() {
+        int original = XGBoostModel.getMaxBin();
+        try {
+            XGBoostModel.setMaxBin(-5);
+            assertEquals(0, XGBoostModel.getMaxBin(), "negative should mean default");
+            XGBoostModel.setMaxBin(0);
+            assertEquals(0, XGBoostModel.getMaxBin());
+            XGBoostModel.setMaxBin(1);
+            assertEquals(2, XGBoostModel.getMaxBin(), "1 bin is not a legal histogram");
+            XGBoostModel.setMaxBin(64);
+            assertEquals(64, XGBoostModel.getMaxBin());
+        } finally {
+            XGBoostModel.setMaxBin(original);
+        }
+    }
 }

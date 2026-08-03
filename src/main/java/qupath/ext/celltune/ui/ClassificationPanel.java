@@ -17,6 +17,7 @@ import qupath.ext.celltune.classifier.FeaturePruner;
 import qupath.ext.celltune.classifier.ModelType;
 import qupath.ext.celltune.classifier.ResamplingStrategy;
 import qupath.ext.celltune.classifier.UncertaintySampler;
+import qupath.ext.celltune.classifier.XGBoostModel;
 import qupath.ext.celltune.io.GroundTruthIO;
 import qupath.ext.celltune.io.ProjectStateManager;
 import qupath.ext.celltune.io.TrainingLogRecorder;
@@ -782,7 +783,12 @@ public class ClassificationPanel extends VBox {
                 "Model 1", classifier.getModel1Type(),
                 "Model 2", classifier.getModel2Type(),
                 "CPU threads", TrainingThreads.total(),
-                "Images at once", workersSpinner.getValue());
+                "Images at once", workersSpinner.getValue(),
+                // Only non-zero when the user has deliberately traded accuracy for speed, and it
+                // changes predictions — so a log that does not record it cannot be compared with
+                // another one.
+                "XGB max_bin",
+                        XGBoostModel.getMaxBin() == 0 ? "256 (default)" : String.valueOf(XGBoostModel.getMaxBin()));
         final java.util.concurrent.atomic.AtomicReference<TrainingLogRecorder> logRecorderRef =
                 new java.util.concurrent.atomic.AtomicReference<>(TrainingLogRecorder.noOp());
 
@@ -1043,8 +1049,14 @@ public class ClassificationPanel extends VBox {
                             }
                         }
 
+                        // Batch-apply is timed into the same breakdown as training. On a project of
+                        // whole slides it is routinely the largest single block of the wait, and a
+                        // summary that stopped at "Done." reported a wall clock the user could see
+                        // was wrong.
+                        var runTimer = classifier.getPhaseTimer();
                         int batchApplied = 0;
                         if (projectRef != null && !batchTargetImages.isEmpty()) {
+                            if (runTimer != null) runTimer.start("apply to other images");
                             batchApplied = TrainingOrchestrator.applyToTargetImages(
                                     projectRef,
                                     imageData,
@@ -1056,6 +1068,7 @@ public class ClassificationPanel extends VBox {
                                     this,
                                     trainLog);
                         }
+                        if (runTimer != null) runTimer.writeSummary();
 
                         final int totalBatchApplied = batchApplied;
                         Platform.runLater(() -> {

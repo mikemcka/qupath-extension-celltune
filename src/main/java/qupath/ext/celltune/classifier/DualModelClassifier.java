@@ -96,7 +96,15 @@ public class DualModelClassifier {
     private TrainingMetrics model2TrainMetrics;
     private TrainingMetrics model2ValMetrics;
 
-    /** @return the phase breakdown of the last (or in-flight) training run; may be null */
+    /**
+     * The phase breakdown of the last (or in-flight) training run; may be null.
+     * <p>
+     * {@link #trainAndPredict} closes its final phase but leaves the summary unwritten, because a
+     * caller that goes on to apply the classifier to other images would otherwise get a total that
+     * excludes the part of the wait it is about to sit through. Add any further phases with
+     * {@link PhaseTimer#start(String)} and call {@link PhaseTimer#writeSummary()} when the run is
+     * genuinely over.
+     */
     public PhaseTimer getPhaseTimer() {
         return phaseTimer;
     }
@@ -590,7 +598,12 @@ public class DualModelClassifier {
             });
         });
 
-        timer.writeSummary();
+        // Closes the last phase and emits its line, but deliberately does not write the summary:
+        // whatever the caller does next (batch-applying to other project images, most of the time)
+        // is part of the run the user is waiting on, and a table written here would exclude it
+        // while presenting a "TOTAL (wall clock)". The caller owns the summary — see
+        // getPhaseTimer().
+        timer.stop();
         out.accept("Done.");
     }
 

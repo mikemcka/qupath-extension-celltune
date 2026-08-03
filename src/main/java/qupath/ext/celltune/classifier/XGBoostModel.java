@@ -480,6 +480,47 @@ public class XGBoostModel {
         p.put("nthread", TrainingThreads.total());
         p.put("seed", 42);
         if (nClasses > 2) p.put("num_class", nClasses);
+        int bins = maxBin;
+        if (bins > 0) p.put("max_bin", bins);
         return p;
+    }
+
+    // ── Histogram resolution ────────────────────────────────────────────────────
+
+    /** 0 means "leave XGBoost's default" (256), which is the behaviour this shipped with. */
+    private static volatile int maxBin = 0;
+
+    /**
+     * Sets the number of histogram bins {@code tree_method=hist} builds per feature.
+     * <p>
+     * This is the one remaining lever with real leverage on training time, and it is opt-in
+     * because it <b>changes the model</b>. After the phase-18 work XGBoost is ~87% of a training
+     * run and a field log confirmed the cost is tree construction, not evaluation — and the split
+     * search inside that scales with the bin count. Measured by {@code XGBoostTuningBenchmark} at
+     * the real field shape (8,646 rows, 1,886 features, 35 classes, 16 cores):
+     * <pre>
+     *   max_bin=256 (default)   68.0 s   1.00x
+     *   max_bin=128             33.9 s   2.01x
+     *   max_bin=64              26.5 s   2.57x
+     * </pre>
+     * Coarser bins are also a form of regularisation, so accuracy does not simply degrade — on
+     * that synthetic fixture 64 bins scored marginally <em>higher</em>. Do not read that as a free
+     * win: the fixture's signal structure is not real marker data, and only the timing ratios
+     * transfer reliably. Anyone lowering this should diff the predicted class column on their own
+     * data first.
+     * <p>
+     * Applies to the round search and the final fit alike, so the round count chosen by early
+     * stopping always matches the model that gets built.
+     *
+     * @param bins bins per feature; {@code 0} (or negative) restores XGBoost's default of 256.
+     *             XGBoost requires at least 2.
+     */
+    public static void setMaxBin(int bins) {
+        maxBin = bins <= 0 ? 0 : Math.max(2, bins);
+    }
+
+    /** @return the configured bin count, or {@code 0} when XGBoost's default is in use */
+    public static int getMaxBin() {
+        return maxBin;
     }
 }

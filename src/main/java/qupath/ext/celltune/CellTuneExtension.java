@@ -26,6 +26,7 @@ import org.slf4j.LoggerFactory;
 import qupath.ext.celltune.classifier.ClassifierState;
 import qupath.ext.celltune.classifier.DualModelClassifier;
 import qupath.ext.celltune.classifier.UncertaintySampler;
+import qupath.ext.celltune.classifier.XGBoostModel;
 import qupath.ext.celltune.io.GroundTruthIO;
 import qupath.ext.celltune.io.ProjectStateManager;
 import qupath.ext.celltune.model.AnnotationLabelCollector;
@@ -88,14 +89,33 @@ public class CellTuneExtension implements QuPathExtension, BinaryClassifierManag
     private static final IntegerProperty trainingThreadsProperty =
             PathPrefs.createPersistentPreference("celltune.trainingThreads", 0);
 
+    /**
+     * Persistent preference — histogram bins per feature for XGBoost. 0 means "XGBoost's default"
+     * (256), which is what this shipped with, so leaving it alone changes nothing.
+     * <p>
+     * Deliberately a preference rather than a control on the training panel: it is the one knob
+     * left that meaningfully changes training time (~2x at 128 bins, ~2.5x at 64 — see
+     * {@link XGBoostModel#setMaxBin}), but it <b>changes predictions</b>, so it should be a
+     * considered decision made once and then diffed, not something adjusted between runs.
+     */
+    private static final IntegerProperty xgbMaxBinProperty =
+            PathPrefs.createPersistentPreference("celltune.xgbMaxBin", 0);
+
     static {
         TrainingThreads.setOverride(trainingThreadsProperty.get());
         trainingThreadsProperty.addListener((v, o, n) -> TrainingThreads.setOverride(n == null ? 0 : n.intValue()));
+        XGBoostModel.setMaxBin(xgbMaxBinProperty.get());
+        xgbMaxBinProperty.addListener((v, o, n) -> XGBoostModel.setMaxBin(n == null ? 0 : n.intValue()));
     }
 
     /** @return the persistent training-thread cap (0 = auto) */
     public static IntegerProperty trainingThreadsProperty() {
         return trainingThreadsProperty;
+    }
+
+    /** @return the persistent XGBoost histogram bin count (0 = XGBoost's default of 256) */
+    public static IntegerProperty xgbMaxBinProperty() {
+        return xgbMaxBinProperty;
     }
 
     private boolean isInstalled = false;
@@ -663,7 +683,17 @@ public class CellTuneExtension implements QuPathExtension, BinaryClassifierManag
                 .category(EXTENSION_NAME)
                 .description(EXTENSION_DESCRIPTION)
                 .build();
-        qupath.getPreferencePane().getPropertySheet().getItems().add(item);
+        var maxBinItem = new PropertyItemBuilder<>(xgbMaxBinProperty, Integer.class)
+                .name("XGBoost histogram bins")
+                .category(EXTENSION_NAME)
+                .description("Bins per feature for XGBoost's histogram split search. 0 = XGBoost's default (256).\n\n"
+                        + "XGBoost dominates training time and this is the main lever on it: 128 bins is roughly "
+                        + "twice as fast, 64 roughly 2.5x, measured on a 35-class, 1,886-feature panel.\n\n"
+                        + "It CHANGES PREDICTIONS. Coarser bins also regularise, so accuracy does not simply drop — "
+                        + "but verify on your own data (export the cell table before and after and diff the "
+                        + "predicted class column) before settling on a value.")
+                .build();
+        qupath.getPreferencePane().getPropertySheet().getItems().addAll(item, maxBinItem);
     }
 
     /**
