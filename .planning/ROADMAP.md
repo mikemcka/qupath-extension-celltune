@@ -234,6 +234,33 @@ Cross-cutting constraints:
 - **Estimator fed RAW values** via the new `CohortClusterModel.poolAllCellsRaw` sibling and `CellFeatureExtractor(..., null)` — never the z-scored `poolAllCells` (correction #3) — spans plans 02 (produces raw) and 03 (consumes raw).
 
 
+## Milestone v1.7 - Training Performance
+
+Goal: Make the human-in-the-loop train -> review -> retrain cycle fast enough to iterate on, and make training failures diagnosable, without changing a single prediction.
+
+### Phase 18 - ML Training Performance and Diagnostics
+
+Goal: Remove the algorithmic cost that dominated training (O(n^2) resampling run three times per click, quadratic LightGBM early stopping, six model fits of which two are discarded), and add the per-run logging and OOM handling needed to see where time goes. Every optimisation is bit-identical, gated by a checksum oracle captured against the pre-change implementation.
+Depends on: Phase 1 (classifier core), and the existing Resampler/DualModelClassifier/TrainValMetricsComputer structure.
+Requirements: PERF-01, PERF-02, PERF-03, PERF-04, PERF-05, PERF-06, PERF-08
+Success Criteria:
+1. Resampling on the real 19-class label set is at least an order of magnitude faster; measured 75x on the default SMOTE+Tomek (167.29s -> 2.22s on 16 cores).
+2. Resampler output is bit-identical for every strategy and invariant to thread count, proven by ResamplerGoldenTest against constants captured pre-change.
+3. Resampling runs at most twice per Train click instead of three times.
+4. Each run writes a durable log with a per-phase timing/heap breakdown to <project>/celltune/logs/.
+5. An OutOfMemoryError is reported with the phase that failed and leaves the UI usable.
+
+**Plans:** 1 plan (executed inline, recorded retroactively)
+
+Plans:
+- [x] 18-01-PLAN.md - Resampler primitive/memoised/parallel fast core, shared 80/20 fold, LightGBM native early stopping, XGBoost hygiene, training log + phase timings + OOM capture, metrics opt-out and thread budget (completed 2026-08-03)
+
+Cross-cutting constraints:
+- **Bit-identical output is the acceptance criterion**, not a goal — ResamplerGoldenTest constants were captured against the pre-change code and must never be re-baselined to make a change pass.
+- **Tomek's tie-break had to become explicit** (argmin, lowest index wins) before the search could be reordered or parallelised; the previous ascending-scan-with-strict-< got it implicitly.
+- Deferred deliberately because they change results: HyperparameterTuner's missing min_gain_to_split, parallel dual-model fitting, tuner thread oversubscription, ADASYN's growing-scan quirk. Also deferred: PERF-07 feature-extraction parallelism.
+
+
 ## Progress
 
 | Phase | Milestone | Requirements | Plans Complete | Status |
@@ -251,3 +278,4 @@ Cross-cutting constraints:
 | 15. All-Cells Leiden Clustering (True-Scanpy) | v1.5 | LEI-06,LEI-07,LEI-08,LEI-09,LEI-10 | 5/5 | Complete (2026-07-06) |
 | 16. PCA Dimensionality Reduction | v1.5 | PCA-01..PCA-06 | 1/1 | Complete (2026-07-06) |
 | 17. In-QuPath Cofactor Suggestion | v1.6 | COF-01..COF-08 | 4/4 | Verified (code); human UAT pending |
+| 18. ML Training Performance and Diagnostics | v1.7 | PERF-01..PERF-06, PERF-08 | 1/1 | Executed + benchmarked; human UAT pending |

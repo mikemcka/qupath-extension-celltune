@@ -41,6 +41,21 @@ Requirements for milestone v1.1 Reliability and Verification Hardening.
 - [x] DOC-01: README documents Project Prediction Summary workflow including open-image and CSV export actions.
 - [x] DOC-02: Standalone build documentation exists with JDK 25 prerequisites and compile/test/shadowJar commands.
 
+## v1.7 Requirements
+
+Requirements for milestone v1.7 Training Performance.
+
+### Training Performance
+
+- [x] PERF-01: Training emits a durable per-run log to `<project>/celltune/logs/` with per-phase timings, dataset shape and heap high-water mark, surviving a crash or OOM.
+- [x] PERF-02: An OutOfMemoryError during training produces a specific actionable dialog, a complete log, and a re-enabled Train button — never a silent hang.
+- [x] PERF-03: Resampler produces bit-identical output to the pre-optimisation implementation for every strategy, verified by checksum tests, and invariant to thread count.
+- [x] PERF-04: Resampler runs at most twice per Train click (was three), with the duplicated 80% fold computed once.
+- [x] PERF-05: LightGBM early stopping uses LightGBM's native incremental validation rather than re-scoring the full validation set every round.
+- [x] PERF-06: No native Booster handles are leaked by the training or tuning paths.
+- [ ] PERF-07: Labelled-cell feature extraction happens once per Train click, in parallel, and cross-image label pooling is parallel and order-deterministic. *(deferred — not executed in phase 18)*
+- [x] PERF-08: Users can skip the train/val metrics step and set an explicit training thread budget; both default to today's behaviour.
+
 ## v2 Requirements
 
 ### Composite Evolution
