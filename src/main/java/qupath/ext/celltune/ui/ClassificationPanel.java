@@ -760,7 +760,10 @@ public class ClassificationPanel extends VBox {
                         "Cells", detections.size(),
                         "Labelled", labelStore.size(),
                         "Features", featureNames.size(),
-                        "Classes", labelStore.getClassNames().size(),
+                        // Scoped explicitly: pooling adds classes from other images, so this is
+                        // routinely lower than the "N classes" the classifier goes on to report,
+                        // which read like a contradiction sitting next to each other.
+                        "Classes (image)", labelStore.getClassNames().size(),
                         "Balancing", getEffectiveResamplingStrategy(),
                         "Early stop", earlyStopCheckBox.isSelected(),
                         "Metrics", computeMetricsCheckBox.isSelected(),
