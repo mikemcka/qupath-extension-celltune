@@ -108,8 +108,17 @@ scoring what gets deployed. Default runs are untouched: the tuner only runs with
 - [ ] Compare against an auto-tuned run on the baseline JAR. Expect **different chosen
       hyperparameters** — that is the fix working, not a regression. What matters is that the
       macro-F1 does not get worse.
-- [ ] Auto-tune should also be somewhat faster: with `min_gain_to_split` applied, folds run out of
-      worthwhile splits and stop early instead of grinding through every round as no-ops.
+- [ ] With **Early stopping also on**, the log must say `Holding rounds at the early-stopping
+      result (…)` and every `Trial n/N` line must show that same `rounds=` value. Previously the
+      round search ran and its answer was thrown away.
+- [ ] The opening line states the total model fit count (`— 200 model fits in total` at the
+      defaults). At a wide panel expect **hours**, not minutes; this is the warning that was
+      missing. Consider testing auto-tune on a reduced feature set first.
+- [ ] Set **CPU threads to 2** and start an auto-tune. The log must **not** print `Parallel CV`,
+      and the machine should stay responsive. Previously the tuner ignored the cap and ran 5
+      concurrent folds each asking for every core.
+- [ ] If any fold fails, the trial line shows `[n/N folds failed]`, and a trial where all folds
+      fail says so instead of reporting `F1 = 0.0000`.
 
 ## 9. LightGBM early stopping
 

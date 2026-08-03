@@ -12,6 +12,8 @@ import ml.dmlc.xgboost4j.java.DMatrix;
 import ml.dmlc.xgboost4j.java.XGBoost;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.celltune.util.BackgroundExecutors;
+import qupath.ext.celltune.util.TrainingThreads;
 
 /**
  * Bayesian (TPE) hyperparameter tuner with stratified k-fold cross-validation.
@@ -91,6 +93,28 @@ public final class HyperparameterTuner {
             int nTrials,
             int nFolds,
             Consumer<String> log) {
+        return tune(flatData, labels, nSamples, nFeatures, nClasses, nTrials, nFolds, null, null, log);
+    }
+
+    /**
+     * @param xgbFixedRounds round count to hold fixed for XGBoost instead of searching over it,
+     *                       or {@code null} to search. Pass the value early stopping chose: it
+     *                       measured the round count against a real validation fold, which a
+     *                       20-trial search over a 50–500 range cannot match, and leaving both to
+     *                       decide meant the round search ran and was then discarded.
+     * @param lgbFixedRounds the same for LightGBM
+     */
+    public static TuningResult tune(
+            float[] flatData,
+            float[] labels,
+            int nSamples,
+            int nFeatures,
+            int nClasses,
+            int nTrials,
+            int nFolds,
+            Integer xgbFixedRounds,
+            Integer lgbFixedRounds,
+            Consumer<String> log) {
         Consumer<String> out = log != null ? log : s -> {};
 
         if (nSamples < MIN_SAMPLES) {
@@ -99,8 +123,20 @@ public final class HyperparameterTuner {
             return new TuningResult(defaults, 0, defaults, 0);
         }
 
-        out.accept(
-                "Auto-tuning: " + nTrials + " TPE trials × " + nFolds + " folds per model on " + nSamples + " samples");
+        // Say what this is actually going to do. "Several minutes" was the old wording, and at a
+        // wide panel with many classes a single fit runs into minutes on its own — 2 x trials x
+        // folds of them is hours, which reads as a hang unless the count is stated up front.
+        out.accept(String.format(
+                "Auto-tuning: %d TPE trials × %d folds per model on %,d samples × %,d features"
+                        + " — %d model fits in total",
+                nTrials, nFolds, nSamples, nFeatures, 2 * nTrials * nFolds));
+        if (xgbFixedRounds != null || lgbFixedRounds != null) {
+            out.accept(String.format(
+                    "  Holding rounds at the early-stopping result (XGBoost %s, LightGBM %s);"
+                            + " searching depth, learning rate and subsample",
+                    xgbFixedRounds == null ? "searched" : xgbFixedRounds,
+                    lgbFixedRounds == null ? "searched" : lgbFixedRounds));
+        }
 
         int[] intLabels = new int[nSamples];
         for (int i = 0; i < nSamples; i++) intLabels[i] = (int) labels[i];
@@ -120,6 +156,7 @@ public final class HyperparameterTuner {
                 folds,
                 nTrials,
                 new Random(42),
+                xgbFixedRounds,
                 out);
 
         out.accept("── Tuning LightGBM ──");
@@ -134,6 +171,7 @@ public final class HyperparameterTuner {
                 folds,
                 nTrials,
                 new Random(43),
+                lgbFixedRounds,
                 out);
 
         out.accept(String.format("Best XGBoost:  %s → F1 = %.4f", xgb.params(), xgb.score()));
@@ -155,25 +193,31 @@ public final class HyperparameterTuner {
             List<int[][]> folds,
             int nTrials,
             Random rng,
+            Integer fixedRounds,
             Consumer<String> log) {
-        TPESampler sampler = new TPESampler(rng);
+        TPESampler sampler = new TPESampler(rng, fixedRounds);
         HyperParams bestParams = null;
         double bestScore = -1;
+        boolean anyTrialScored = false;
 
-        int totalCores = Runtime.getRuntime().availableProcessors();
+        // The training thread budget, not the core count: a user who caps CPU threads to keep the
+        // machine usable meant it to apply here too, and this is the heaviest thing the extension
+        // does. It used to call availableProcessors() directly and ignore the cap entirely.
+        int budget = TrainingThreads.total();
         int nFolds = folds.size();
-        // Parallelize folds when we have enough cores (at least 2 per fold)
-        boolean parallelFolds = totalCores >= nFolds * 2;
-        int threadsPerFoldXGB = parallelFolds ? Math.max(1, totalCores / nFolds) : totalCores;
-        int threadsPerFoldLGB = totalCores; // Always use all cores for LightGBM
+        // Parallelise folds when there is enough budget for at least 2 threads each.
+        boolean parallelFolds = budget >= nFolds * 2;
+        // Both models divide the budget across concurrent folds. LightGBM used to take the whole
+        // budget per fold while XGBoost divided it, so five concurrent folds asked for five times
+        // the machine.
+        int threadsPerFold = parallelFolds ? TrainingThreads.forConcurrentTasks(nFolds) : budget;
 
         if (parallelFolds) {
             log.accept(String.format(
-                    "  Parallel CV: %d folds × %d threads/fold (XGB), %d threads/fold (LGB) (%d cores)",
-                    nFolds, threadsPerFoldXGB, threadsPerFoldLGB, totalCores));
+                    "  Parallel CV: %d folds × %d threads/fold (%d thread budget)", nFolds, threadsPerFold, budget));
         }
 
-        ExecutorService foldPool = parallelFolds ? Executors.newFixedThreadPool(nFolds) : null;
+        ExecutorService foldPool = parallelFolds ? BackgroundExecutors.newFixedPool(nFolds, "CellTune-Tune") : null;
 
         try {
             for (int trial = 0; trial < nTrials; trial++) {
@@ -205,7 +249,7 @@ public final class HyperparameterTuner {
                                         nFeatures,
                                         nClasses,
                                         hp,
-                                        threadsPerFoldXGB)
+                                        threadsPerFold)
                                 : evaluateLightGBMFold(
                                         foldTrainData,
                                         foldTrainLabels,
@@ -216,7 +260,7 @@ public final class HyperparameterTuner {
                                         nFeatures,
                                         nClasses,
                                         hp,
-                                        threadsPerFoldLGB)));
+                                        threadsPerFold)));
                     }
 
                     for (Future<Double> f : futures) {
@@ -227,7 +271,7 @@ public final class HyperparameterTuner {
                                 validFolds++;
                             }
                         } catch (InterruptedException | ExecutionException e) {
-                            logger.debug("Parallel fold failed: {}", e.getMessage());
+                            logger.warn("Parallel CV fold failed: {}", e.toString());
                         }
                     }
                 } else {
@@ -252,7 +296,7 @@ public final class HyperparameterTuner {
                                         nFeatures,
                                         nClasses,
                                         hp,
-                                        threadsPerFoldXGB)
+                                        threadsPerFold)
                                 : evaluateLightGBMFold(
                                         foldTrainData,
                                         foldTrainLabels,
@@ -263,7 +307,7 @@ public final class HyperparameterTuner {
                                         nFeatures,
                                         nClasses,
                                         hp,
-                                        threadsPerFoldLGB);
+                                        threadsPerFold);
 
                         if (f1 >= 0) {
                             totalScore += f1;
@@ -272,12 +316,26 @@ public final class HyperparameterTuner {
                     }
                 }
 
-                double meanScore = validFolds > 0 ? totalScore / validFolds : 0;
+                int failedFolds = nFolds - validFolds;
+                if (validFolds == 0) {
+                    // No information at all. Feeding 0 to the sampler would be worse than useless:
+                    // TPE would read it as "this region scores terribly" and steer away from
+                    // hyperparameters that were never actually evaluated. Skip the observation.
+                    log.accept(String.format(
+                            "  Trial %2d/%d: %s → ALL %d FOLDS FAILED (see the log for the cause;"
+                                    + " out of memory is the usual one at this width)",
+                            trial + 1, nTrials, hp, nFolds));
+                    continue;
+                }
+
+                double meanScore = totalScore / validFolds;
                 sampler.observe(hp, meanScore);
+                anyTrialScored = true;
 
                 String marker = meanScore > bestScore ? " ★" : "";
-                log.accept(
-                        String.format("  Trial %2d/%d: %s → F1 = %.4f%s", trial + 1, nTrials, hp, meanScore, marker));
+                String failures = failedFolds > 0 ? String.format("  [%d/%d folds failed]", failedFolds, nFolds) : "";
+                log.accept(String.format(
+                        "  Trial %2d/%d: %s → F1 = %.4f%s%s", trial + 1, nTrials, hp, meanScore, marker, failures));
 
                 if (meanScore > bestScore) {
                     bestScore = meanScore;
@@ -290,8 +348,12 @@ public final class HyperparameterTuner {
             }
         }
 
-        if (bestParams == null) {
+        if (!anyTrialScored || bestParams == null) {
+            // Every trial failed, so the search learned nothing. Returning the first random draw
+            // would look like a tuned result; the documented defaults are the honest answer.
             bestParams = new HyperParams(200, 6, 0.1f, 0.8f);
+            bestScore = -1;
+            log.accept("  No trial produced a usable score — falling back to defaults: " + bestParams);
         }
 
         return new ModelTuneResult(bestParams, bestScore);
@@ -316,12 +378,33 @@ public final class HyperparameterTuner {
         private static final int WARM_UP = 5;
         private static final int N_DIMS = 4;
 
+        /** Index of the rounds dimension in the transformed vector. */
+        private static final int DIM_ROUNDS = 0;
+
         private final Random rng;
         private final List<double[]> history = new ArrayList<>();
         private final List<Double> scores = new ArrayList<>();
 
-        TPESampler(Random rng) {
+        /**
+         * When early stopping already chose a round count, that value is used verbatim and the
+         * rounds dimension drops out of the search entirely — it is not merely overwritten
+         * afterwards. Leaving it in would have the KDE score trials at one round count and the
+         * deployed model use another, which is the same "tuned a model that never got built"
+         * failure the shared parameter builders exist to prevent.
+         */
+        private final Integer fixedRounds;
+
+        /** The dimensions actually being searched — all four, or the three besides rounds. */
+        private final int[] dims;
+
+        TPESampler(Random rng, Integer fixedRounds) {
             this.rng = rng;
+            this.fixedRounds = fixedRounds;
+            if (fixedRounds == null) {
+                this.dims = new int[] {0, 1, 2, 3};
+            } else {
+                this.dims = new int[] {1, 2, 3};
+            }
         }
 
         void observe(HyperParams hp, double score) {
@@ -374,7 +457,8 @@ public final class HyperparameterTuner {
         /** Sample a point from a Gaussian KDE fitted to the given observations. */
         private double[] sampleFromKDE(List<double[]> points) {
             double[] sample = new double[N_DIMS];
-            for (int d = 0; d < N_DIMS; d++) {
+            if (fixedRounds != null) sample[DIM_ROUNDS] = fixedRounds;
+            for (int d : dims) {
                 double[] center = points.get(rng.nextInt(points.size()));
                 double bw = silvermanBW(points, d);
                 sample[d] = center[d] + rng.nextGaussian() * bw;
@@ -386,7 +470,7 @@ public final class HyperparameterTuner {
         /** Evaluate the KDE density at a point (product of per-dimension densities). */
         private double evaluateKDE(double[] x, List<double[]> points) {
             double logDensity = 0;
-            for (int d = 0; d < N_DIMS; d++) {
+            for (int d : dims) {
                 double bw = silvermanBW(points, d);
                 double density = 0;
                 for (double[] pt : points) {
@@ -421,8 +505,13 @@ public final class HyperparameterTuner {
         }
 
         private HyperParams sampleUniform() {
-            int rounds = ROUNDS_MIN + rng.nextInt(ROUNDS_MAX - ROUNDS_MIN + 1);
-            rounds = ((rounds + 5) / 10) * 10;
+            int rounds;
+            if (fixedRounds != null) {
+                rounds = fixedRounds;
+            } else {
+                rounds = ROUNDS_MIN + rng.nextInt(ROUNDS_MAX - ROUNDS_MIN + 1);
+                rounds = ((rounds + 5) / 10) * 10;
+            }
             int depth = DEPTH_MIN + rng.nextInt(DEPTH_MAX - DEPTH_MIN + 1);
             float eta =
                     (float) Math.exp(Math.log(ETA_MIN) + rng.nextDouble() * (Math.log(ETA_MAX) - Math.log(ETA_MIN)));
@@ -435,8 +524,13 @@ public final class HyperparameterTuner {
         }
 
         private HyperParams fromTransformed(double[] x) {
-            int rounds = (int) Math.round(x[0]);
-            rounds = Math.max(ROUNDS_MIN, Math.min(ROUNDS_MAX, ((rounds + 5) / 10) * 10));
+            int rounds;
+            if (fixedRounds != null) {
+                rounds = fixedRounds;
+            } else {
+                rounds = (int) Math.round(x[DIM_ROUNDS]);
+                rounds = Math.max(ROUNDS_MIN, Math.min(ROUNDS_MAX, ((rounds + 5) / 10) * 10));
+            }
             int depth = Math.max(DEPTH_MIN, Math.min(DEPTH_MAX, (int) Math.round(x[1])));
             float eta = (float) Math.max(ETA_MIN, Math.min(ETA_MAX, Math.exp(x[2])));
             float sub = (float) Math.max(SUB_MIN, Math.min(SUB_MAX, x[3]));
@@ -515,7 +609,7 @@ public final class HyperparameterTuner {
             return macroF1(predClasses, testTruth, nClasses);
 
         } catch (Exception e) {
-            logger.debug("XGBoost CV fold failed: {}", e.getMessage());
+            logger.warn("XGBoost CV fold failed: {}", e.toString());
             return -1;
         } finally {
             // One booster per fold per trial — 100 per tuned model. Each holds a native handle
@@ -576,7 +670,7 @@ public final class HyperparameterTuner {
             return macroF1(predClasses, testTruth, nClasses);
 
         } catch (Exception e) {
-            logger.debug("LightGBM CV fold failed: {}", e.getMessage());
+            logger.warn("LightGBM CV fold failed: {}", e.toString());
             return -1;
         } finally {
             try {

@@ -445,8 +445,31 @@ public class DualModelClassifier {
         // ── 1d. Auto-tune hyperparameters if requested (boosted models only) ──
         if (autoTune && (mdl1Boosted || mdl2Boosted)) {
             updateStatus("Auto-tuning hyperparameters…", earlyStop ? 0.10 : 0.05);
-            out.accept("Auto-tuning hyperparameters (this may take several minutes)…");
+            out.accept("Auto-tuning hyperparameters…");
             timer.start("auto-tune");
+
+            // Hand the round counts early stopping already measured to the tuner and let it hold
+            // them fixed. They used to be overwritten by the tuner's own search a few lines below,
+            // so with both options ticked the entire round search — the single most expensive
+            // phase of the run — was performed and then thrown away. Early stopping also picks
+            // rounds better: it watches a held-out fold round by round, where the tuner samples a
+            // handful of values from a 50–500 range and scores each with a full fit.
+            // Guarded on the fold, not on the earlyStop flag: the search is skipped for too few
+            // samples even when the box is ticked, and in that case the round counts are still
+            // untouched defaults with nothing measured behind them.
+            //
+            // The tuner returns one parameter set per library, so when both models use the same
+            // one there is a single round count to fix; model 1's is used, matching which model's
+            // parameters the shared result is named after.
+            Integer xgbRounds = null;
+            Integer lgbRounds = null;
+            if (sharedFold != null) {
+                if (model2Type == ModelType.XGBOOST) xgbRounds = mdl2Rounds;
+                else if (model2Type == ModelType.LIGHTGBM) lgbRounds = mdl2Rounds;
+                if (model1Type == ModelType.XGBOOST) xgbRounds = mdl1Rounds;
+                else if (model1Type == ModelType.LIGHTGBM) lgbRounds = mdl1Rounds;
+            }
+
             var tuneResult = HyperparameterTuner.tune(
                     flatData,
                     labelArray,
@@ -455,6 +478,8 @@ public class DualModelClassifier {
                     nClasses,
                     HyperparameterTuner.DEFAULT_TRIALS,
                     HyperparameterTuner.DEFAULT_FOLDS,
+                    xgbRounds,
+                    lgbRounds,
                     out);
             if (mdl1Boosted && model1Type == ModelType.XGBOOST) {
                 mdl1Rounds = tuneResult.xgbParams().numRounds();
