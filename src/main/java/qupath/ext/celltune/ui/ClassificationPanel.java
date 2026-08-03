@@ -153,28 +153,36 @@ public class ClassificationPanel extends VBox {
         depthSpinner.setPrefWidth(70);
         depthSpinner.setTooltip(new Tooltip(STRINGS.getString("param.max_depth.help")));
 
-        // Number of parallel workers for the per-image batch prediction step.
-        // Default 1 (safe on memory). Capped at 8 — each worker loads a full slide
-        // hierarchy into memory.
+        // ── The two parallelism controls ──
+        // Deliberately separate, because they are bounded by different resources: one by RAM
+        // (a slide at a time), one by CPU (threads inside one training run). A single combined
+        // "use N of the machine" number could not express "plenty of cores, not much memory".
+        // The labels carry that distinction so the tooltips are not load-bearing.
+
+        // Images in parallel — memory-bound. Each one holds a whole slide's object hierarchy, so
+        // this is capped low and defaults to 1. Only affects the batch-apply step after training.
         workersSpinner = new Spinner<>(1, 8, 1, 1);
         workersSpinner.setEditable(true);
         workersSpinner.setPrefWidth(70);
-        workersSpinner.setTooltip(new Tooltip("Number of parallel workers used when applying the trained classifier "
-                + "to other selected images. Higher = faster but uses more memory "
-                + "(each worker loads a full slide)."));
+        workersSpinner.setTooltip(new Tooltip("How many images are classified at the same time by"
+                + " 'Apply to which images…',\nafter training finishes.\n\n"
+                + "Bounded by memory: each one loads a full slide, so raising it costs RAM"
+                + " rather than CPU.\nHas no effect on training itself, or if no target images"
+                + " are selected."));
 
-        // Distinct from "Workers:" above — that one parallelises *applying* a trained classifier
-        // across images; this one caps the threads the ML libraries themselves use while training.
-        Spinner<Integer> trainThreadsSpinner = new Spinner<>(
+        // CPU threads — compute-bound. Applies inside a single training run (both models plus
+        // resampling), and is the total budget, not a per-model figure.
+        Spinner<Integer> cpuThreadsSpinner = new Spinner<>(
                 0,
                 Runtime.getRuntime().availableProcessors(),
                 CellTuneExtension.trainingThreadsProperty().get());
-        trainThreadsSpinner.setPrefWidth(70);
-        trainThreadsSpinner.setTooltip(new Tooltip("Threads used by XGBoost/LightGBM and resampling during training.\n"
-                + "0 = automatic (all " + Runtime.getRuntime().availableProcessors() + " processors).\n\n"
-                + "This is not the same as 'Workers', which parallelises applying a trained\n"
-                + "classifier to other images."));
-        trainThreadsSpinner
+        cpuThreadsSpinner.setPrefWidth(70);
+        cpuThreadsSpinner.setTooltip(new Tooltip("How much CPU training may use: threads for"
+                + " XGBoost/LightGBM and resampling\nwithin a single training run.\n\n"
+                + "0 = automatic (all " + Runtime.getRuntime().availableProcessors() + " processors)."
+                + " Lower it to keep the machine responsive\nwhile training.\n\n"
+                + "Bounded by CPU, not memory — unlike 'Images at once'."));
+        cpuThreadsSpinner
                 .valueProperty()
                 .addListener(
                         (v, o, n) -> CellTuneExtension.trainingThreadsProperty().set(n == null ? 0 : n));
@@ -185,10 +193,10 @@ public class ClassificationPanel extends VBox {
                 roundsSpinner,
                 new Label(STRINGS.getString("param.max_depth.label")),
                 depthSpinner,
-                new Label("Workers:"),
-                workersSpinner,
-                new Label("Train threads:"),
-                trainThreadsSpinner);
+                new Label("CPU threads:"),
+                cpuThreadsSpinner,
+                new Label("Images at once:"),
+                workersSpinner);
         paramRow.setAlignment(Pos.CENTER_LEFT);
 
         // ── Pool images checkbox ──
@@ -761,7 +769,8 @@ public class ClassificationPanel extends VBox {
                         "Pool images", poolImagesCheckBox.isSelected(),
                         "Model 1", classifier.getModel1Type(),
                         "Model 2", classifier.getModel2Type(),
-                        "Threads", TrainingThreads.total()));
+                        "CPU threads", TrainingThreads.total(),
+                        "Images at once", workersSpinner.getValue()));
 
         // Batch the text-area appends. Tuning and batch-apply emit lines faster than the FX
         // thread can lay out a TextArea, and one runLater per line floods the event queue enough

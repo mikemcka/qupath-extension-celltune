@@ -160,8 +160,8 @@ final class TrainingOrchestrator {
         // and predictOnly(populateSets=false) does not mutate shared state.
         int parallelism = Math.min(workers, targetImages.size());
         parallelism = Math.max(1, parallelism);
-        trainLog.accept("Applying classifier to " + targetImages.size() + " target image(s) using " + parallelism
-                + " worker(s)…");
+        trainLog.accept(
+                "Applying classifier to " + targetImages.size() + " target image(s), " + parallelism + " at once…");
 
         var poolExec = Executors.newFixedThreadPool(parallelism, r -> {
             Thread t = new Thread(r, "CellTune-BatchPredict");
