@@ -67,3 +67,48 @@ the amount of label available.
 
 Ran at 8 images at once (user raised it from the default 1) and overlapped loads with predictions
 cleanly, reaching 13/14 saved by the end of the captured log.
+
+---
+
+# Follow-up: XGBoost best-round snapshot (measured)
+
+`SnapBench` (standalone, `/vast/scratch/users/mckay.m/celltune-bench`), 14 cores, at the shape of
+the field run: 35 classes, 1,886 features, 6,851 train rows, 996 val rows, maxRounds 200.
+
+|  | time |
+|---|---|
+| A) search (no snapshot) | 426.58 s |
+| A) retrain to best round | 424.32 s |
+| **A) total today** | **850.89 s** |
+| B) search (+ snapshot) | 476.27 s |
+| B) loadModel from bytes | 0.12 s |
+| **B) total proposed** | **476.38 s** |
+| **saved** | **374.51 s (44.0%)** |
+
+**Predictions identical — 0 differing floats, max abs diff 0.000e+00.**
+
+This is the worst case for the snapshot: validation loss improved on all 200 rounds, so 200
+snapshots were taken of a model that reached 9,981 KB. The field run's search stopped at round 127
+of 200 with improvements tapering, so both the overhead and the absolute saving are smaller there —
+the metrics XGBoost fit was ~195 s, so expect ~160-175 s net, around 22% of that 730 s run.
+
+Notable: of the +49.69 s snapshot overhead, only **4.29 s** is `toByteArray` itself. The rest is GC
+churn from ~2 GB of transient arrays. That is why `searchRounds` takes a `snapshot` flag rather
+than always snapshotting — `DualModelClassifier` sets it only when the metrics step will actually
+consume the result (`computeMetrics && nRealSamples >= 20`). If overhead ever matters more, the
+lever is snapshotting less often, not serialising faster.
+
+## Implementation
+
+`XGBoostModel.searchRounds(..., boolean snapshot, ...)` returns `RoundSearch(bestRounds,
+bestModel)`; `findBestRounds` is now a delegating overload. `DualModelClassifier` passes the bytes
+to `computeTrainValMetrics`, whose trainer lambdas restore via `loadFromBytes` instead of fitting —
+**guarded on array identity** against `PreparedFold.trainData()`, so if the metrics step ever
+trains on anything other than the fold the search used, it silently falls back to a real fit.
+
+`XGBoostRoundSearchTest` (4 tests, run against the real natives — verified not skipped) pins:
+the restored snapshot predicts identically to a fresh fit of the same round count; taking a
+snapshot does not change which round the search picks; no snapshot is produced when not requested;
+`findBestRounds` still returns just the count.
+
+Only XGBoost is wired up. LightGBM's whole search is ~12 s, so there is nothing to reclaim there.
