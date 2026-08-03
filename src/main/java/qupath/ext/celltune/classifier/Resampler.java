@@ -42,8 +42,10 @@ import qupath.ext.celltune.util.TrainingThreads;
  *   <li>Tomek's search iterates a per-class index partition, so the different-class filter is
  *       structural rather than a test per candidate, and abandons a distance early once it
  *       exceeds the best so far.</li>
- *   <li>The Tomek search and the neighbour precomputation are parallelised; each task writes only
- *       its own output slot, so there is nothing to merge.</li>
+ *   <li>The Tomek search and the neighbour precomputation are parallelised over one shared pool;
+ *       each task writes only its own output slot, so there is nothing to merge. The neighbour
+ *       batch splits the <em>selected</em> positions rather than the whole class, so a selection
+ *       that is a leading prefix (SMOTE) or scattered (ADASYN) still divides evenly.</li>
  * </ul>
  * Because the parallel search visits candidates out of index order, the "nearest different-class
  * neighbour" tie-break is made explicit ({@code argmin} with lowest index winning) instead of
@@ -106,34 +108,32 @@ public final class Resampler {
 
         Buffer buf = Buffer.from(rows, labels, capacity);
 
-        try (Parallel par = new Parallel()) {
-            switch (strategy) {
-                case SMOTE -> {
-                    smote(buf, classCounts, maxCount, nClasses, out, par);
-                }
-                case ADASYN -> {
-                    adasyn(buf, classCounts, maxCount, nClasses, out, par);
-                }
-                case TOMEK -> {
-                    int removed = tomekLinks(buf, classCounts, nClasses, par);
-                    out.accept("Tomek links removed " + removed + " majority-class samples");
-                }
-                case SMOTE_TOMEK -> {
-                    smote(buf, classCounts, maxCount, nClasses, out, par);
-                    // Recount after SMOTE
-                    int[] newCounts = buf.recount(nClasses);
-                    int removed = tomekLinks(buf, newCounts, nClasses, par);
-                    out.accept("Tomek links removed " + removed + " borderline samples after SMOTE");
-                }
-                case ADASYN_TOMEK -> {
-                    adasyn(buf, classCounts, maxCount, nClasses, out, par);
-                    int[] newCounts = buf.recount(nClasses);
-                    int removed = tomekLinks(buf, newCounts, nClasses, par);
-                    out.accept("Tomek links removed " + removed + " borderline samples after ADASYN");
-                }
-                default -> {
-                    /* NONE — handled above */
-                }
+        switch (strategy) {
+            case SMOTE -> {
+                smote(buf, classCounts, maxCount, nClasses, out);
+            }
+            case ADASYN -> {
+                adasyn(buf, classCounts, maxCount, nClasses, out);
+            }
+            case TOMEK -> {
+                int removed = tomekLinks(buf, classCounts, nClasses);
+                out.accept("Tomek links removed " + removed + " majority-class samples");
+            }
+            case SMOTE_TOMEK -> {
+                smote(buf, classCounts, maxCount, nClasses, out);
+                // Recount after SMOTE
+                int[] newCounts = buf.recount(nClasses);
+                int removed = tomekLinks(buf, newCounts, nClasses);
+                out.accept("Tomek links removed " + removed + " borderline samples after SMOTE");
+            }
+            case ADASYN_TOMEK -> {
+                adasyn(buf, classCounts, maxCount, nClasses, out);
+                int[] newCounts = buf.recount(nClasses);
+                int removed = tomekLinks(buf, newCounts, nClasses);
+                out.accept("Tomek links removed " + removed + " borderline samples after ADASYN");
+            }
+            default -> {
+                /* NONE — handled above */
             }
         }
 
@@ -156,8 +156,7 @@ public final class Resampler {
 
     // ── SMOTE ───────────────────────────────────────────────────────────────────
 
-    private static void smote(
-            Buffer buf, int[] classCounts, int targetCount, int nClasses, Consumer<String> log, Parallel par) {
+    private static void smote(Buffer buf, int[] classCounts, int targetCount, int nClasses, Consumer<String> log) {
         Random rng = new Random(42);
         int nFeatures = buf.rows[0].length;
 
@@ -176,7 +175,7 @@ public final class Resampler {
             // Pre-compute the k nearest same-class neighbours once per source sample. The
             // generation loop below cycles i % m, so without this each sample's identical
             // neighbour set is recomputed ceil(needed/m) times.
-            int[][] knn = knnSameClassBatch(buf.rows, classIndices, k, Math.min(m, needed), par);
+            int[][] knn = knnSameClassBatch(buf.rows, classIndices, k, Math.min(m, needed));
 
             int generated = 0;
             for (int i = 0; generated < needed; i++) {
@@ -203,8 +202,7 @@ public final class Resampler {
 
     // ── ADASYN ──────────────────────────────────────────────────────────────────
 
-    private static void adasyn(
-            Buffer buf, int[] classCounts, int targetCount, int nClasses, Consumer<String> log, Parallel par) {
+    private static void adasyn(Buffer buf, int[] classCounts, int targetCount, int nClasses, Consumer<String> log) {
         Random rng = new Random(42);
         int nFeatures = buf.rows[0].length;
         int totalSamples = buf.size;
@@ -228,7 +226,7 @@ public final class Resampler {
 
             // For each minority sample, compute ratio of different-class neighbours
             double[] ratios = new double[m];
-            par.range(m, (long) m * scanN * nFeatures, (lo, hi) -> {
+            parallelRange(m, (long) m * scanN * nFeatures, (lo, hi) -> {
                 for (int i = lo; i < hi; i++) {
                     int idx = classIndices[i];
                     int[] nnIndices = knnAll(buf.rows, scanN, idx, k);
@@ -246,7 +244,7 @@ public final class Resampler {
 
             if (ratioSum < 1e-10) {
                 // All neighbours are same class — fall back to uniform SMOTE
-                smoteSingle(buf, classIndices, needed, nFeatures, rng, par);
+                smoteSingle(buf, classIndices, needed, nFeatures, rng);
                 log.accept("ADASYN (uniform fallback): generated " + needed + " synthetic samples for class " + cls);
                 continue;
             }
@@ -264,7 +262,7 @@ public final class Resampler {
                 used[i] = true;
                 planned += Math.min(numForThis, needed - planned);
             }
-            int[][] knn = knnSameClassBatch(buf.rows, classIndices, kLocal, used, par);
+            int[][] knn = knnSameClassBatch(buf.rows, classIndices, kLocal, used);
 
             // Normalise ratios to get per-sample generation weights
             int generated = 0;
@@ -292,12 +290,11 @@ public final class Resampler {
         }
     }
 
-    private static void smoteSingle(
-            Buffer buf, int[] classIndices, int needed, int nFeatures, Random rng, Parallel par) {
+    private static void smoteSingle(Buffer buf, int[] classIndices, int needed, int nFeatures, Random rng) {
         int m = classIndices.length;
         int k = Math.min(DEFAULT_K, m - 1);
         int cls = buf.labels[classIndices[0]];
-        int[][] knn = knnSameClassBatch(buf.rows, classIndices, k, Math.min(m, needed), par);
+        int[][] knn = knnSameClassBatch(buf.rows, classIndices, k, Math.min(m, needed));
 
         int generated = 0;
         for (int i = 0; generated < needed; i++) {
@@ -325,7 +322,7 @@ public final class Resampler {
      *
      * @return number of samples removed
      */
-    private static int tomekLinks(Buffer buf, int[] classCounts, int nClasses, Parallel par) {
+    private static int tomekLinks(Buffer buf, int[] classCounts, int nClasses) {
         int maxCount = 0;
         for (int c : classCounts) if (c > maxCount) maxCount = c;
 
@@ -346,7 +343,7 @@ public final class Resampler {
 
         // For each sample, find its nearest neighbour of a different class
         final int[] nnDiffClass = new int[n];
-        par.range(n, (long) n * n * nFeatures, (lo, hi) -> {
+        parallelRange(n, (long) n * n * nFeatures, (lo, hi) -> {
             for (int i = lo; i < hi; i++) {
                 float[] a = rows[i];
                 int labelA = labels[i];
@@ -405,26 +402,37 @@ public final class Resampler {
      * Computes {@link #knnSameClass} for the first {@code count} members of {@code classIndices}
      * — the ones the generation loop will cycle through.
      */
-    private static int[][] knnSameClassBatch(float[][] rows, int[] classIndices, int k, int count, Parallel par) {
+    private static int[][] knnSameClassBatch(float[][] rows, int[] classIndices, int k, int count) {
         boolean[] wanted = new boolean[classIndices.length];
         for (int i = 0; i < count; i++) wanted[i] = true;
-        return knnSameClassBatch(rows, classIndices, k, wanted, par);
+        return knnSameClassBatch(rows, classIndices, k, wanted);
     }
 
-    /** Computes {@link #knnSameClass} for the selected members of {@code classIndices}. */
-    private static int[][] knnSameClassBatch(
-            float[][] rows, int[] classIndices, int k, boolean[] wanted, Parallel par) {
+    /**
+     * Computes {@link #knnSameClass} for the selected members of {@code classIndices}.
+     * <p>
+     * The split is over the <em>selected</em> positions, not over {@code [0, m)}. Both are
+     * value-identical — each slot is filled by the same pure function of unchanging inputs — but
+     * chunking the raw range hands every thread an equal slice of <em>positions</em> while the
+     * work sits wherever {@code wanted} happens to be true. That is routinely lopsided: SMOTE
+     * selects a leading prefix when {@code needed < m}, and ADASYN's selection is scattered by the
+     * per-sample ratios, so most threads would be handed nothing to do.
+     */
+    private static int[][] knnSameClassBatch(float[][] rows, int[] classIndices, int k, boolean[] wanted) {
         int m = classIndices.length;
         int[][] out = new int[m][];
         int nFeatures = m > 0 ? rows[classIndices[0]].length : 0;
+
         int wantedCount = 0;
         for (boolean b : wanted) if (b) wantedCount++;
+        int[] todo = new int[wantedCount];
+        int w = 0;
+        for (int p = 0; p < m; p++) if (wanted[p]) todo[w++] = p;
 
-        par.range(m, (long) wantedCount * m * nFeatures, (lo, hi) -> {
-            for (int p = lo; p < hi; p++) {
-                if (wanted[p]) {
-                    out[p] = knnSameClass(rows, classIndices, classIndices[p], k);
-                }
+        parallelRange(wantedCount, (long) wantedCount * m * nFeatures, (lo, hi) -> {
+            for (int t = lo; t < hi; t++) {
+                int p = todo[t];
+                out[p] = knnSameClass(rows, classIndices, classIndices[p], k);
             }
         });
         return out;
@@ -557,58 +565,69 @@ public final class Resampler {
     }
 
     /**
-     * Runs index ranges across a pool sized from the training thread budget, created lazily so a
-     * small dataset never pays for one. Tasks here write only to their own output slots, so there
-     * is no accumulator to merge and no ordering to preserve.
+     * The pool every resampling run shares, created on first use.
+     * <p>
+     * Sized to {@code availableProcessors()} — the ceiling {@link TrainingThreads#setOverride}
+     * clamps to — so it can serve the budget however the user later moves it. The budget itself is
+     * applied per call, through how many chunks {@link #parallelRange} submits; the pool's size is
+     * what keeps <em>concurrent</em> callers from collectively exceeding the machine, which the
+     * previous pool-per-call could not do. It also stops a train click paying thread construction
+     * twice, once for each {@code apply}.
+     * <p>
+     * Held in a holder class so it is created on first resample rather than on class load, and
+     * never shut down: its workers are daemon threads that time out when the work stops, so an
+     * idle pool holds nothing and cannot block JVM shutdown.
      */
-    private static final class Parallel implements AutoCloseable {
+    private static final class SharedPool {
 
-        private ExecutorService pool;
+        private static ExecutorService instance;
 
-        /**
-         * Splits {@code [0, n)} into one contiguous chunk per thread.
-         *
-         * @param estimatedWork rough operation count, used to skip the split when the work is too
-         *                      small to be worth a hand-off
-         */
-        void range(int n, long estimatedWork, RangeTask task) {
-            int threads = Math.min(TrainingThreads.total(), n);
-            if (threads <= 1 || estimatedWork < PARALLEL_MIN_WORK) {
-                task.run(0, n);
-                return;
+        static synchronized ExecutorService get() {
+            if (instance == null) {
+                instance = BackgroundExecutors.newElasticPool(
+                        Runtime.getRuntime().availableProcessors(), "CellTune-Resample");
             }
-            if (pool == null) {
-                pool = BackgroundExecutors.newFixedPool(TrainingThreads.total(), "CellTune-Resample");
-            }
-            int chunk = (n + threads - 1) / threads;
-            List<Future<?>> futures = new ArrayList<>(threads);
-            for (int t = 0; t < threads; t++) {
-                final int lo = t * chunk;
-                final int hi = Math.min(n, lo + chunk);
-                if (lo >= hi) break;
-                futures.add(pool.submit(() -> task.run(lo, hi)));
-            }
-            try {
-                for (Future<?> f : futures) {
-                    f.get();
-                }
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("Resampling was interrupted", ie);
-            } catch (ExecutionException ee) {
-                Throwable cause = ee.getCause();
-                if (cause instanceof RuntimeException re) throw re;
-                if (cause instanceof Error err) throw err;
-                throw new IllegalStateException("Resampling failed", cause);
-            }
+            return instance;
         }
+    }
 
-        @Override
-        public void close() {
-            if (pool != null) {
-                pool.shutdown();
-                pool = null;
+    /**
+     * Splits {@code [0, n)} into one contiguous chunk per thread and runs them on the shared pool.
+     * <p>
+     * Every task writes only to its own output slots, so there is no accumulator to merge and no
+     * ordering to preserve — which is what makes the split safe. Nothing a task runs calls back
+     * into here, so a running task can never be waiting on a queued sibling.
+     *
+     * @param estimatedWork rough operation count, used to skip the split when the work is too
+     *                      small to be worth a hand-off
+     */
+    private static void parallelRange(int n, long estimatedWork, RangeTask task) {
+        int threads = Math.min(TrainingThreads.total(), n);
+        if (threads <= 1 || estimatedWork < PARALLEL_MIN_WORK) {
+            task.run(0, n);
+            return;
+        }
+        ExecutorService pool = SharedPool.get();
+        int chunk = (n + threads - 1) / threads;
+        List<Future<?>> futures = new ArrayList<>(threads);
+        for (int t = 0; t < threads; t++) {
+            final int lo = t * chunk;
+            final int hi = Math.min(n, lo + chunk);
+            if (lo >= hi) break;
+            futures.add(pool.submit(() -> task.run(lo, hi)));
+        }
+        try {
+            for (Future<?> f : futures) {
+                f.get();
             }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Resampling was interrupted", ie);
+        } catch (ExecutionException ee) {
+            Throwable cause = ee.getCause();
+            if (cause instanceof RuntimeException re) throw re;
+            if (cause instanceof Error err) throw err;
+            throw new IllegalStateException("Resampling failed", cause);
         }
     }
 

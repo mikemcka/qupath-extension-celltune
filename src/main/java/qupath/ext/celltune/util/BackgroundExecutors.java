@@ -2,7 +2,10 @@ package qupath.ext.celltune.util;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Factory for the daemon-threaded background executors used across the
@@ -38,5 +41,25 @@ public final class BackgroundExecutors {
     /** Fixed-size pool of {@code nThreads} daemon threads named {@code name}. */
     public static ExecutorService newFixedPool(int nThreads, String name) {
         return Executors.newFixedThreadPool(nThreads, daemonThreadFactory(name));
+    }
+
+    /**
+     * A pool of at most {@code nThreads} daemon threads that lets idle workers die off.
+     * <p>
+     * For a pool that is used in short bursts and then reused: {@link #newFixedPool} would keep
+     * every worker parked between bursts, and creating a fresh fixed pool per burst pays thread
+     * construction every time and — worse — lets concurrent callers each hold a full-width pool,
+     * so nothing bounds the total. This is long-lived and shared instead, with a keep-alive that
+     * releases the threads once the work stops.
+     * <p>
+     * Unlike the other factories here, a caller does <em>not</em> shut this down: it is meant to
+     * be a shared singleton, and the threads are daemon, so an idle pool costs nothing and never
+     * blocks JVM shutdown.
+     */
+    public static ExecutorService newElasticPool(int nThreads, String name) {
+        ThreadPoolExecutor exec = new ThreadPoolExecutor(
+                nThreads, nThreads, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), daemonThreadFactory(name));
+        exec.allowCoreThreadTimeOut(true);
+        return exec;
     }
 }
