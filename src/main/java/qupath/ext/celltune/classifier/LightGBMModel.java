@@ -206,8 +206,16 @@ public class LightGBMModel {
         try {
             double bestLoss = Double.MAX_VALUE;
             int bestRound = 0;
-            // Decided once rather than per round: a mid-search switch would mix two metrics into
-            // one comparison, and this way the change can never be slower than the old path.
+            // One-way latch: native scoring is used until it misbehaves, after which the rest of
+            // the search is scored manually and never switches back. It cannot oscillate, so the
+            // change can never end up slower than the old always-manual path.
+            //
+            // A mid-search fallback does compare a manual loss against a best-so-far that came
+            // from LightGBM, which is only sound because they are the same quantity: mean log-loss
+            // over the same validation rows, same formula, same /n. They differ at most by
+            // LightGBM's internal probability clamp. Nothing here relies on tighter agreement than
+            // that, and reaching this path at all means getEval already returned a non-finite
+            // value, which does not happen in a healthy run.
             boolean useNative = metricIdx >= 0;
 
             for (int round = 0; round < maxRounds; round++) {

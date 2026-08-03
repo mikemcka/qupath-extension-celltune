@@ -176,6 +176,7 @@ public class ClassificationPanel extends VBox {
                 0,
                 Runtime.getRuntime().availableProcessors(),
                 CellTuneExtension.trainingThreadsProperty().get());
+        cpuThreadsSpinner.setEditable(true);
         cpuThreadsSpinner.setPrefWidth(70);
         cpuThreadsSpinner.setTooltip(new Tooltip("How much CPU training may use: threads for"
                 + " XGBoost/LightGBM and resampling\nwithin a single training run.\n\n"
@@ -654,7 +655,10 @@ public class ClassificationPanel extends VBox {
         // is the dominant allocation, and resampling inflates the row count before any of that,
         // so warn while the user can still act (fewer features, or a bigger -Xmx).
         if (!TrainingMemoryCheck.confirmEnoughHeap(
-                detections.size(), featureNames.size(), labelStore.size(), getEffectiveResamplingStrategy())) {
+                detections.size(),
+                featureNames.size(),
+                labelStore.getClassCounts().values(),
+                getEffectiveResamplingStrategy())) {
             return;
         }
 
@@ -753,27 +757,34 @@ public class ClassificationPanel extends VBox {
         // Durable copy of this run's log. The on-screen text area is discarded when the progress
         // window closes, and is never written at all if the JVM dies — which is exactly the case
         // (OOM, native crash) worth being able to read afterwards.
-        final TrainingLogRecorder logRecorder = TrainingLogRecorder.open(project);
-        logRecorder.writeHeader(
-                activeBinaryMarker != null ? "Binary training — " + activeBinaryMarker : "Multi-class training",
-                TrainingLogRecorder.settings(
-                        "Cells", detections.size(),
-                        "Labelled", labelStore.size(),
-                        "Features", featureNames.size(),
-                        // Scoped explicitly: pooling adds classes from other images, so this is
-                        // routinely lower than the "N classes" the classifier goes on to report,
-                        // which read like a contradiction sitting next to each other.
-                        "Classes (image)", labelStore.getClassNames().size(),
-                        "Balancing", getEffectiveResamplingStrategy(),
-                        "Early stop", earlyStopCheckBox.isSelected(),
-                        "Metrics", computeMetricsCheckBox.isSelected(),
-                        "Auto-tune", autoTuneCheckBox.isSelected(),
-                        "Auto-prune", autoPruneCheckBox.isSelected(),
-                        "Pool images", poolImagesCheckBox.isSelected(),
-                        "Model 1", classifier.getModel1Type(),
-                        "Model 2", classifier.getModel2Type(),
-                        "CPU threads", TrainingThreads.total(),
-                        "Images at once", workersSpinner.getValue()));
+        //
+        // The settings are read here because they come from UI controls, which must be touched on
+        // the FX thread. Opening the file is not: it creates a directory, lists and prunes the
+        // existing logs, then writes a flushed line per header row, and on a project sitting on a
+        // network share that is enough I/O to stall the click. The worker does it instead, so
+        // until it has, this holds a recorder that discards everything.
+        final String logTitle =
+                activeBinaryMarker != null ? "Binary training — " + activeBinaryMarker : "Multi-class training";
+        final List<String[]> logSettings = TrainingLogRecorder.settings(
+                "Cells", detections.size(),
+                "Labelled", labelStore.size(),
+                "Features", featureNames.size(),
+                // Scoped explicitly: pooling adds classes from other images, so this is
+                // routinely lower than the "N classes" the classifier goes on to report,
+                // which read like a contradiction sitting next to each other.
+                "Classes (image)", labelStore.getClassNames().size(),
+                "Balancing", getEffectiveResamplingStrategy(),
+                "Early stop", earlyStopCheckBox.isSelected(),
+                "Metrics", computeMetricsCheckBox.isSelected(),
+                "Auto-tune", autoTuneCheckBox.isSelected(),
+                "Auto-prune", autoPruneCheckBox.isSelected(),
+                "Pool images", poolImagesCheckBox.isSelected(),
+                "Model 1", classifier.getModel1Type(),
+                "Model 2", classifier.getModel2Type(),
+                "CPU threads", TrainingThreads.total(),
+                "Images at once", workersSpinner.getValue());
+        final java.util.concurrent.atomic.AtomicReference<TrainingLogRecorder> logRecorderRef =
+                new java.util.concurrent.atomic.AtomicReference<>(TrainingLogRecorder.noOp());
 
         // Batch the text-area appends. Tuning and batch-apply emit lines faster than the FX
         // thread can lay out a TextArea, and one runLater per line floods the event queue enough
@@ -781,7 +792,7 @@ public class ClassificationPanel extends VBox {
         final StringBuilder pendingLog = new StringBuilder();
         final java.util.concurrent.atomic.AtomicBoolean flushQueued = new java.util.concurrent.atomic.AtomicBoolean();
         Consumer<String> trainLog = msg -> {
-            logRecorder.accept(msg);
+            logRecorderRef.get().accept(msg);
             synchronized (pendingLog) {
                 pendingLog.append(msg).append('\n');
             }
@@ -830,6 +841,12 @@ public class ClassificationPanel extends VBox {
         final int workers = workersSpinner.getValue();
         Thread trainThread = new Thread(
                 () -> {
+                    // Opened here rather than on the FX thread: this touches the filesystem, and
+                    // every header line is flushed individually. Set before any logging so the
+                    // header is the first thing in the file.
+                    final TrainingLogRecorder logRecorder = TrainingLogRecorder.open(projectRef);
+                    logRecorderRef.set(logRecorder);
+                    logRecorder.writeHeader(logTitle, logSettings);
                     try {
                         // Auto-backup labels
                         if (projectRef != null) {
@@ -1114,7 +1131,9 @@ public class ClassificationPanel extends VBox {
                             logRecorder.accept(String.format(
                                     "!! Out of memory during '%s' — peak heap %,d MB of %,d MB", phase, peakMb, maxMb));
                         }
-                        logRecorder.close();
+                        // No close() here — the finally below runs as soon as this block ends,
+                        // which is before the runLater below can reach the FX thread, so the file
+                        // is complete by the time the dialog quotes its path.
                         final String message = oom
                                 ? String.format(
                                         "Out of memory during '%s'.%n%n"

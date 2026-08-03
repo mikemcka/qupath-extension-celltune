@@ -19,6 +19,12 @@ metrics on) and watch the training log.
 
 ## 2. Results unchanged — the safety claim
 
+> **Leave `CPU threads` at 0 (auto) for this whole section.** It now feeds XGBoost's `nthread` and
+> LightGBM's `num_threads`, and both build their histograms with a thread-count-dependent summation
+> order — so changing it *will* move predictions slightly. That is expected behaviour, not a
+> regression, but it invalidates the diff below. Before this change the value was always
+> `availableProcessors()`, so a same-machine comparison was automatically like-for-like.
+
 - [ ] The log's `Resampled distribution:` line reports the **same** per-class counts and total as
       a pre-change run. (`git stash` the branch, build the old JAR, and keep that log to diff, or
       compare against a log from before this change.)
@@ -52,12 +58,26 @@ and train on the largest image with all features selected.
 - [ ] **Train/val metrics** checkbox, default ON. Unchecking it makes training visibly faster and
       the log says "Skipping train/val metrics (unchecked)". The Training Metrics button then
       reports no metrics available rather than showing stale ones from an earlier run.
-- [ ] **Train threads:** spinner, default 0 (= auto). Set it to 2, retrain, and confirm the log's
+- [ ] **CPU threads:** spinner, default 0 (= auto). Set it to 2, retrain, and confirm the log's
       `Threads:` line reflects it and CPU use drops. Confirm it persists across a QuPath restart.
-- [ ] Confirm the tooltip makes clear it is distinct from the existing **Workers:** spinner
-      (which parallelises *applying* a classifier to other images).
+- [ ] Confirm the two labels read as different knobs: **CPU threads** (inside one training run)
+      versus **Images at once** (parallel *applying* of a classifier to other images).
 
-## 6. LightGBM early stopping (the one non-bit-identical change)
+## 6. Auto-tune with early stopping — the metrics must describe the deployed model
+
+The round search can keep its winning XGBoost model so the metrics step does not refit it. That is
+only valid when the hyperparameters have not moved since, and auto-tune replaces all of them.
+
+- [ ] Model 1 = XGBoost, **Early stopping ON, Auto-tune ON**, Train/val metrics ON. Train.
+- [ ] The log must **not** show the "kept the round-N model" line — with auto-tune on, the search
+      is told not to snapshot, and the metrics step does a real fit with the tuned settings.
+- [ ] The rounds/depth the log reports for the final fit are the tuned ones, and the reported
+      macro-F1 is consistent with them (a wildly optimistic or stale-looking score is the symptom
+      this guards against).
+- [ ] Re-run with Auto-tune OFF: the "kept the round-N model" line *should* appear, and the
+      train/val metrics should be unchanged from a pre-change run.
+
+## 7. LightGBM early stopping (the one non-bit-identical change)
 
 Early stopping now reads LightGBM's own log-loss instead of a hand-rolled one.
 

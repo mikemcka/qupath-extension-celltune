@@ -1,5 +1,6 @@
 package qupath.ext.celltune.ui;
 
+import java.util.Collection;
 import qupath.ext.celltune.classifier.ResamplingStrategy;
 import qupath.fx.dialogs.Dialogs;
 
@@ -23,9 +24,12 @@ final class TrainingMemoryCheck {
     private static final long BYTES_PER_FLOAT = 4L;
 
     /**
-     * Multiplier applied to the training matrix when resampling is on. Oversampling lifts every
-     * class to the majority count; on a real 19-class panel (5,839 labelled cells, majority
-     * 1,348) that came to 25,612 rows, ~4.4x. Rounded up for headroom.
+     * Fallback multiplier for the resampled row count, used only when the per-class counts are not
+     * available. Oversampling lifts every class to the majority count; on a real 19-class panel
+     * (5,839 labelled cells, majority 1,348) that came to 25,612 rows, ~4.4x. Rounded up for
+     * headroom. When the counts <em>are</em> known the exact figure is used instead — the true
+     * factor swings from ~1x on a balanced set to well over 10x on a badly skewed one, which a
+     * single constant cannot express.
      */
     private static final double RESAMPLING_INFLATION = 5.0;
 
@@ -46,23 +50,44 @@ final class TrainingMemoryCheck {
 
     /**
      * Estimates peak heap for a run and, if it looks tight, asks the user whether to continue.
+     * <p>
+     * Counts what is knowable at the point of asking: the labels on this image. Pooling and
+     * imported rows are added later on the background thread, so a pooled run trains on more than
+     * this. That makes the estimate a floor, which is the right direction for a warning that is
+     * meant to catch "this cannot possibly fit".
      *
-     * @param nCells     detections that will be predicted
-     * @param nFeatures  feature columns after selection and pruning
-     * @param nLabelled  labelled cells that will form the training matrix
-     * @param strategy   resampling strategy, which inflates the training matrix
+     * @param nCells      detections that will be predicted
+     * @param nFeatures   feature columns after selection and pruning
+     * @param classCounts labelled cells per class; may be {@code null} or empty
+     * @param strategy    resampling strategy, which inflates the training matrix
      * @return {@code true} to proceed — either because there is room, or because the user chose
      *         to continue anyway
      */
-    static boolean confirmEnoughHeap(int nCells, int nFeatures, int nLabelled, ResamplingStrategy strategy) {
+    static boolean confirmEnoughHeap(
+            int nCells, int nFeatures, Collection<Long> classCounts, ResamplingStrategy strategy) {
         long maxHeapBytes = Runtime.getRuntime().maxMemory();
         double maxHeapGiB = toGiB(maxHeapBytes);
 
         double predictGiB = toGiB((long) nCells * nFeatures * BYTES_PER_FLOAT);
 
+        long nLabelled = 0;
+        long majority = 0;
+        int nClasses = 0;
+        if (classCounts != null) {
+            for (Long c : classCounts) {
+                if (c == null) continue;
+                nLabelled += c;
+                majority = Math.max(majority, c);
+                nClasses++;
+            }
+        }
+
         double trainRows = nLabelled;
         if (strategy != null && strategy != ResamplingStrategy.NONE) {
-            trainRows *= RESAMPLING_INFLATION;
+            // Every oversampling strategy lifts each class to the majority count, so the post-
+            // resampling row count is exactly nClasses x majority. Tomek only ever removes, so
+            // that is an upper bound for the combined strategies too.
+            trainRows = nClasses > 0 ? (double) nClasses * majority : nLabelled * RESAMPLING_INFLATION;
         }
         double trainGiB = toGiB((long) (trainRows * nFeatures * BYTES_PER_FLOAT));
 
@@ -85,7 +110,8 @@ final class TrainingMemoryCheck {
                         nCells,
                         nFeatures,
                         (strategy != null && strategy != ResamplingStrategy.NONE)
-                                ? String.format(" (%,d labelled cells, inflated by %s)", nLabelled, strategy)
+                                ? String.format(
+                                        " (%,d labelled cells → %,d after %s)", nLabelled, (long) trainRows, strategy)
                                 : String.format(" (%,d labelled cells)", nLabelled),
                         estimatedPeakGiB,
                         maxHeapGiB));

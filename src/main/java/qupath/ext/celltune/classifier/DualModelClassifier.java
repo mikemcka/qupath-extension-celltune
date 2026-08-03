@@ -296,8 +296,8 @@ public class DualModelClassifier {
         TrainValMetricsComputer.PreparedFold sharedFold = null;
         // The XGBoost model as it stood at its best round, kept from the search so the metrics
         // step does not have to rebuild the identical model on the identical fold.
-        byte[] mdl1BestModel = null;
-        byte[] mdl2BestModel = null;
+        BestModel mdl1BestModel = null;
+        BestModel mdl2BestModel = null;
 
         if (earlyStop && nRealSamples >= 20 && (mdl1Boosted || mdl2Boosted)) {
             updateStatus("Finding optimal round counts…", 0.05);
@@ -326,7 +326,14 @@ public class DualModelClassifier {
             // this exact fold, so the snapshot spares it a full refit. Serialising on every
             // improvement is not free (mostly GC churn on a wide multi-class model), so it is not
             // worth doing speculatively.
-            boolean keepBestModel = computeMetrics && nRealSamples >= 20;
+            //
+            // Never when auto-tuning. The snapshot is taken here, with the hyperparameters as they
+            // stand *now*; auto-tune runs afterwards and replaces rounds/depth/eta/subsample
+            // wholesale. Reusing it would report metrics for a model built from the pre-tune
+            // settings while the deployed model uses the tuned ones — a silently wrong report,
+            // which is worse than the refit it saves. Not taking the snapshot also skips its cost
+            // on a run that could never use it; the matching check in BestModel is the backstop.
+            boolean keepBestModel = computeMetrics && !autoTune && nRealSamples >= 20;
 
             timer.start("early stop: " + model1Type);
             if (mdl1Boosted && model1Type == ModelType.XGBOOST) {
@@ -347,7 +354,7 @@ public class DualModelClassifier {
                         keepBestModel,
                         out);
                 mdl1Rounds = search.bestRounds();
-                mdl1BestModel = search.bestModel();
+                mdl1BestModel = BestModel.of(search.bestModel(), mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub);
             } else if (mdl1Boosted && model1Type == ModelType.LIGHTGBM) {
                 mdl1Rounds = LightGBMModel.findBestRounds(
                         esTrainData,
@@ -385,7 +392,7 @@ public class DualModelClassifier {
                         keepBestModel,
                         out);
                 mdl2Rounds = search.bestRounds();
-                mdl2BestModel = search.bestModel();
+                mdl2BestModel = BestModel.of(search.bestModel(), mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub);
             } else if (mdl2Boosted && model2Type == ModelType.LIGHTGBM) {
                 mdl2Rounds = LightGBMModel.findBestRounds(
                         esTrainData,
@@ -1092,6 +1099,28 @@ public class DualModelClassifier {
         return xgbModel;
     }
 
+    /**
+     * A serialised booster from the round search, carrying the hyperparameters it was built with.
+     * <p>
+     * Restoring it is only sound when the metrics step would otherwise have fitted <em>exactly</em>
+     * this model, so the reuse site checks the settings rather than trusting the call order. That
+     * is not hypothetical: auto-tuning runs after the search and replaces all four values, and
+     * without this check the metrics report would describe the pre-tune model while the deployed
+     * one used the tuned settings.
+     */
+    private record BestModel(byte[] bytes, int rounds, int depth, float eta, float subsample) {
+
+        /** @return a snapshot, or {@code null} when the search did not keep one */
+        static BestModel of(byte[] bytes, int rounds, int depth, float eta, float subsample) {
+            return bytes == null ? null : new BestModel(bytes, rounds, depth, eta, subsample);
+        }
+
+        /** @return true if this model is the one a fit with these settings would have produced */
+        boolean matches(int r, int d, float e, float s) {
+            return rounds == r && depth == d && eta == e && subsample == s;
+        }
+    }
+
     private void computeTrainValMetrics(
             List<float[]> realRows,
             List<Integer> realLabels,
@@ -1109,13 +1138,14 @@ public class DualModelClassifier {
             float mdl2Sub,
             Consumer<String> out,
             TrainValMetricsComputer.PreparedFold cachedFold,
-            byte[] mdl1BestModel,
-            byte[] mdl2BestModel)
+            BestModel mdl1BestModel,
+            BestModel mdl2BestModel)
             throws Exception {
         // The evaluation copies are trained on cachedFold.trainData() — the very array the round
         // search consumed. When the search kept its winning model, restoring it is exactly the
-        // fit that would otherwise be redone, so guard on array identity and fall back to
-        // training whenever anything about the fold differs.
+        // fit that would otherwise be redone. Both halves of "exactly" are checked: array identity
+        // for the fold, and the four hyperparameters for the model. Anything else falls back to a
+        // real fit — reporting metrics for a model that was never trained is worse than the refit.
         float[] foldData = cachedFold != null ? cachedFold.trainData() : null;
         TrainValMetricsComputer.Result result = TrainValMetricsComputer.compute(
                 realRows,
@@ -1125,8 +1155,11 @@ public class DualModelClassifier {
                 nFeatures,
                 strategy,
                 (data, labels, n) -> {
-                    if (mdl1BestModel != null && model1Type == ModelType.XGBOOST && data == foldData) {
-                        getOrCreateXgb().loadFromBytes(mdl1BestModel, classNames, featureNames);
+                    if (mdl1BestModel != null
+                            && model1Type == ModelType.XGBOOST
+                            && data == foldData
+                            && mdl1BestModel.matches(mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub)) {
+                        getOrCreateXgb().loadFromBytes(mdl1BestModel.bytes(), classNames, featureNames);
                     } else {
                         trainModel(
                                 model1Type, true, data, labels, n, nFeatures, mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub);
@@ -1135,8 +1168,11 @@ public class DualModelClassifier {
                 (data, n) -> predictModel(model1Type, true, data, n, nFeatures),
                 "Model 1 (" + model1Type + ")",
                 (data, labels, n) -> {
-                    if (mdl2BestModel != null && model2Type == ModelType.XGBOOST && data == foldData) {
-                        getOrCreateXgb().loadFromBytes(mdl2BestModel, classNames, featureNames);
+                    if (mdl2BestModel != null
+                            && model2Type == ModelType.XGBOOST
+                            && data == foldData
+                            && mdl2BestModel.matches(mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub)) {
+                        getOrCreateXgb().loadFromBytes(mdl2BestModel.bytes(), classNames, featureNames);
                     } else {
                         trainModel(
                                 model2Type, false, data, labels, n, nFeatures, mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub);

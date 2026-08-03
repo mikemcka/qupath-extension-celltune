@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.util.ArrayList;
 import java.util.List;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import qupath.ext.celltune.util.TrainingThreads;
@@ -25,6 +26,12 @@ import qupath.ext.celltune.util.TrainingThreads;
  * <p>
  * Fixtures are pure functions of their index (no {@link java.util.Random}, no I/O) so they are
  * stable across JDKs and machines.
+ * <p>
+ * <b>Not safe to run concurrently with other tests.</b> Two of these set
+ * {@link TrainingThreads#setOverride(int)}, which is process-global; they restore it in a
+ * {@code finally}, which is sufficient only because JUnit parallel execution is off (there is no
+ * {@code junit-platform.properties}). If it is ever switched on, this class needs
+ * {@code @Execution(SAME_THREAD)} or an isolated resource lock.
  */
 class ResamplerGoldenTest {
 
@@ -124,8 +131,24 @@ class ResamplerGoldenTest {
         return build("severe", new int[] {500, 5, 40}, 6, 0.25f);
     }
 
+    /**
+     * Wide enough that Tomek's bounded distance actually abandons candidates part-way.
+     * <p>
+     * {@code distSqBounded} only tests its bound on every 8th element, so with 8 or fewer features
+     * it always runs to completion and returns the same value the unbounded version would — which
+     * is exactly what the three fixtures above do. Nothing then covers the branch that returns a
+     * <em>partial</em> sum, even though it is the one that fires on essentially every comparison
+     * in production (a pruned panel is ~200 features wide).
+     * <p>
+     * 40 features with heavily overlapping classes puts a large majority of pairs above the
+     * running best within the first 8 dimensions, so the early return is the common case here.
+     */
+    private static Fixture wide() {
+        return build("wide", new int[] {160, 90, 50}, 40, 0.05f);
+    }
+
     private static List<Fixture> fixtures() {
-        return List.of(moderate(), duplicates(), severe());
+        return List.of(moderate(), duplicates(), severe(), wide());
     }
 
     private static final ResamplingStrategy[] STRATEGIES = {
@@ -201,6 +224,12 @@ class ResamplerGoldenTest {
         put("severe", ResamplingStrategy.TOMEK, 537, new int[] {492, 5, 40}, 0xdcaf60fb9fea8af9L);
         put("severe", ResamplingStrategy.SMOTE_TOMEK, 1386, new int[] {471, 445, 470}, 0xedfe96f95c24f41eL);
         put("severe", ResamplingStrategy.ADASYN_TOMEK, 1358, new int[] {469, 436, 453}, 0x6073edbfc08178fL);
+
+        put("wide", ResamplingStrategy.SMOTE, 480, new int[] {160, 160, 160}, 0x867f8bf34b60d028L);
+        put("wide", ResamplingStrategy.ADASYN, 480, new int[] {160, 160, 160}, 0x69ed756f1e871b7aL);
+        put("wide", ResamplingStrategy.TOMEK, 272, new int[] {132, 90, 50}, 0x35ccc88efa44ce7bL);
+        put("wide", ResamplingStrategy.SMOTE_TOMEK, 358, new int[] {132, 99, 127}, 0xc386626ed1c41194L);
+        put("wide", ResamplingStrategy.ADASYN_TOMEK, 358, new int[] {131, 99, 128}, 0x6609afc74a0d575bL);
     }
 
     private static void put(String fixture, ResamplingStrategy s, int size, int[] counts, long checksum) {
@@ -210,10 +239,16 @@ class ResamplerGoldenTest {
     // ── Capture helper ──────────────────────────────────────────────────────────
 
     /**
-     * Prints the current output signature for every fixture/strategy pair. Not an assertion —
-     * run this against a known-good build to (re)capture the constants above when the fixtures
-     * themselves change, never to paper over a behavioural diff.
+     * Prints the current output signature for every fixture/strategy pair. A tool, not a test: it
+     * asserts nothing and so can never fail, which is why it stays disabled rather than printing
+     * on every build.
+     * <p>
+     * Enable it only when a <em>fixture</em> changes, and run it against an implementation known
+     * to be correct — the existing constants were captured by pointing this at the pre-optimisation
+     * brute-force {@code Resampler}, which is the only thing that makes them an oracle. Never run
+     * it against a modified {@code Resampler} to paper over a behavioural diff.
      */
+    @Disabled("capture tool — enable only to re-baseline after a fixture change; see javadoc")
     @Test
     @DisplayName("capture: print output signatures for all fixture/strategy pairs")
     void captureSignatures() {

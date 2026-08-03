@@ -45,6 +45,7 @@ public final class TrainingLogRecorder implements AutoCloseable {
     private final Path file;
     private final BufferedWriter writer;
     private boolean writeFailed = false;
+    private boolean closed = false;
 
     private TrainingLogRecorder(Path file, BufferedWriter writer) {
         this.file = file;
@@ -78,6 +79,16 @@ public final class TrainingLogRecorder implements AutoCloseable {
         }
     }
 
+    /**
+     * A recorder that discards everything. Lets a caller hold a non-null recorder before the real
+     * one has been opened, so no call site needs a null check.
+     *
+     * @return a recorder that writes nowhere
+     */
+    public static TrainingLogRecorder noOp() {
+        return new TrainingLogRecorder(null, null);
+    }
+
     /** Deletes all but the {@value #RETAIN_LOGS} most recent {@code training-*.log} files. */
     private static void pruneOldLogs(Path dir) {
         try (Stream<Path> files = Files.list(dir)) {
@@ -100,8 +111,8 @@ public final class TrainingLogRecorder implements AutoCloseable {
     }
 
     /** @return true if this recorder is writing to a file */
-    public boolean isRecording() {
-        return writer != null && !writeFailed;
+    public synchronized boolean isRecording() {
+        return writer != null && !writeFailed && !closed;
     }
 
     /**
@@ -131,10 +142,13 @@ public final class TrainingLogRecorder implements AutoCloseable {
     }
 
     /**
-     * Appends one line. Safe to call from any thread and after a write failure; never throws.
+     * Appends one line. Safe to call from any thread, after a write failure, and after
+     * {@link #close()}; never throws. A late line is dropped silently rather than warned about —
+     * the batch-apply step can still be draining its log when the run's try/finally has already
+     * closed this, and that is not a fault worth reporting.
      */
     public synchronized void accept(String message) {
-        if (writer == null || writeFailed) {
+        if (writer == null || writeFailed || closed) {
             return;
         }
         try {
@@ -180,11 +194,17 @@ public final class TrainingLogRecorder implements AutoCloseable {
         }
     }
 
+    /**
+     * Flushes and closes the file. Idempotent, and safe to interleave with {@link #accept} from
+     * another thread: a second close is a no-op rather than a failed flush on a closed stream,
+     * and lines arriving afterwards are dropped silently.
+     */
     @Override
     public synchronized void close() {
-        if (writer == null) {
+        if (writer == null || closed) {
             return;
         }
+        closed = true;
         try {
             writer.flush();
             writer.close();
