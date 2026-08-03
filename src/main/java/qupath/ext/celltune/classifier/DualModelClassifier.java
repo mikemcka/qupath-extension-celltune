@@ -294,6 +294,10 @@ public class DualModelClassifier {
         // is built at most once per run and shared. Stays null when early stopping is off, in
         // which case the metrics step builds its own.
         TrainValMetricsComputer.PreparedFold sharedFold = null;
+        // The XGBoost model as it stood at its best round, kept from the search so the metrics
+        // step does not have to rebuild the identical model on the identical fold.
+        byte[] mdl1BestModel = null;
+        byte[] mdl2BestModel = null;
 
         if (earlyStop && nRealSamples >= 20 && (mdl1Boosted || mdl2Boosted)) {
             updateStatus("Finding optimal round counts…", 0.05);
@@ -318,9 +322,15 @@ public class DualModelClassifier {
                         + split[1].length + " real samples)");
             }
 
+            // Snapshot the winning model only if the metrics step is going to run: it trains on
+            // this exact fold, so the snapshot spares it a full refit. Serialising on every
+            // improvement is not free (mostly GC churn on a wide multi-class model), so it is not
+            // worth doing speculatively.
+            boolean keepBestModel = computeMetrics && nRealSamples >= 20;
+
             timer.start("early stop: " + model1Type);
             if (mdl1Boosted && model1Type == ModelType.XGBOOST) {
-                mdl1Rounds = XGBoostModel.findBestRounds(
+                var search = XGBoostModel.searchRounds(
                         esTrainData,
                         esTrainLabels,
                         esTrainSize,
@@ -334,7 +344,10 @@ public class DualModelClassifier {
                         mdl1Eta,
                         mdl1Sub,
                         patience,
+                        keepBestModel,
                         out);
+                mdl1Rounds = search.bestRounds();
+                mdl1BestModel = search.bestModel();
             } else if (mdl1Boosted && model1Type == ModelType.LIGHTGBM) {
                 mdl1Rounds = LightGBMModel.findBestRounds(
                         esTrainData,
@@ -355,7 +368,7 @@ public class DualModelClassifier {
 
             timer.start("early stop: " + model2Type);
             if (mdl2Boosted && model2Type == ModelType.XGBOOST) {
-                mdl2Rounds = XGBoostModel.findBestRounds(
+                var search = XGBoostModel.searchRounds(
                         esTrainData,
                         esTrainLabels,
                         esTrainSize,
@@ -369,7 +382,10 @@ public class DualModelClassifier {
                         mdl2Eta,
                         mdl2Sub,
                         patience,
+                        keepBestModel,
                         out);
+                mdl2Rounds = search.bestRounds();
+                mdl2BestModel = search.bestModel();
             } else if (mdl2Boosted && model2Type == ModelType.LIGHTGBM) {
                 mdl2Rounds = LightGBMModel.findBestRounds(
                         esTrainData,
@@ -476,7 +492,9 @@ public class DualModelClassifier {
                         mdl2Eta,
                         mdl2Sub,
                         out,
-                        sharedFold);
+                        sharedFold,
+                        mdl1BestModel,
+                        mdl2BestModel);
             } catch (Exception ex) {
                 logger.warn("Failed to compute training/validation metrics", ex);
                 out.accept("Note: train/val metrics computation failed: " + ex.getMessage());
@@ -1068,6 +1086,12 @@ public class DualModelClassifier {
      * themselves overwritten by the final full-data training step that runs
      * immediately after.
      */
+    /** Lazily creates the shared XGBoost model, matching {@code trainModel}'s own init. */
+    private XGBoostModel getOrCreateXgb() {
+        if (xgbModel == null) xgbModel = new XGBoostModel();
+        return xgbModel;
+    }
+
     private void computeTrainValMetrics(
             List<float[]> realRows,
             List<Integer> realLabels,
@@ -1084,8 +1108,15 @@ public class DualModelClassifier {
             float mdl2Eta,
             float mdl2Sub,
             Consumer<String> out,
-            TrainValMetricsComputer.PreparedFold cachedFold)
+            TrainValMetricsComputer.PreparedFold cachedFold,
+            byte[] mdl1BestModel,
+            byte[] mdl2BestModel)
             throws Exception {
+        // The evaluation copies are trained on cachedFold.trainData() — the very array the round
+        // search consumed. When the search kept its winning model, restoring it is exactly the
+        // fit that would otherwise be redone, so guard on array identity and fall back to
+        // training whenever anything about the fold differs.
+        float[] foldData = cachedFold != null ? cachedFold.trainData() : null;
         TrainValMetricsComputer.Result result = TrainValMetricsComputer.compute(
                 realRows,
                 realLabels,
@@ -1093,12 +1124,24 @@ public class DualModelClassifier {
                 nClasses,
                 nFeatures,
                 strategy,
-                (data, labels, n) -> trainModel(
-                        model1Type, true, data, labels, n, nFeatures, mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub),
+                (data, labels, n) -> {
+                    if (mdl1BestModel != null && model1Type == ModelType.XGBOOST && data == foldData) {
+                        getOrCreateXgb().loadFromBytes(mdl1BestModel, classNames, featureNames);
+                    } else {
+                        trainModel(
+                                model1Type, true, data, labels, n, nFeatures, mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub);
+                    }
+                },
                 (data, n) -> predictModel(model1Type, true, data, n, nFeatures),
                 "Model 1 (" + model1Type + ")",
-                (data, labels, n) -> trainModel(
-                        model2Type, false, data, labels, n, nFeatures, mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub),
+                (data, labels, n) -> {
+                    if (mdl2BestModel != null && model2Type == ModelType.XGBOOST && data == foldData) {
+                        getOrCreateXgb().loadFromBytes(mdl2BestModel, classNames, featureNames);
+                    } else {
+                        trainModel(
+                                model2Type, false, data, labels, n, nFeatures, mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub);
+                    }
+                },
                 (data, n) -> predictModel(model2Type, false, data, n, nFeatures),
                 "Model 2 (" + model2Type + ")",
                 classNames,

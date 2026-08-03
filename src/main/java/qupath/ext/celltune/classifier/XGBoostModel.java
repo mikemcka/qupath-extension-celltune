@@ -114,6 +114,17 @@ public class XGBoostModel {
     // ── Early Stopping ──────────────────────────────────────────────────────────
 
     /**
+     * Outcome of a round search.
+     *
+     * @param bestRounds the round count with the lowest validation loss (1-indexed)
+     * @param bestModel  the booster serialised as it stood at {@code bestRounds}, or {@code null}
+     *                   if snapshotting was disabled. Boosting is sequential and seeded, so this
+     *                   is the same model a fresh {@code bestRounds}-round fit on the same fold
+     *                   would produce — the rounds that followed only appended trees.
+     */
+    record RoundSearch(int bestRounds, byte[] bestModel) {}
+
+    /**
      * Find the optimal number of boosting rounds by training on a subset and
      * monitoring validation loss. Uses CPU only for speed.
      *
@@ -135,6 +146,54 @@ public class XGBoostModel {
             int patience,
             Consumer<String> log)
             throws Exception {
+        return searchRounds(
+                        trainData,
+                        trainLabels,
+                        trainSize,
+                        valData,
+                        valLabels,
+                        valSize,
+                        nFeatures,
+                        nClasses,
+                        maxRounds,
+                        maxDepth,
+                        eta,
+                        subsample,
+                        patience,
+                        false,
+                        log)
+                .bestRounds();
+    }
+
+    /**
+     * Round search that also hands back the model at the winning round.
+     * <p>
+     * Without this the search discards its booster and returns only a count, so the caller has to
+     * rebuild the identical model from scratch on the identical fold — which on a wide
+     * multi-class panel costs as much as the search itself. Snapshotting captures it instead.
+     * <p>
+     * The snapshot is taken only when the validation loss improves, which is most rounds early on
+     * and rare later. {@code toByteArray} is not free on a large multi-class model, so
+     * {@code snapshot} is a parameter rather than always-on: the caller decides whether a
+     * downstream fit is actually going to reuse it.
+     */
+    static RoundSearch searchRounds(
+            float[] trainData,
+            float[] trainLabels,
+            int trainSize,
+            float[] valData,
+            float[] valLabels,
+            int valSize,
+            int nFeatures,
+            int nClasses,
+            int maxRounds,
+            int maxDepth,
+            float eta,
+            float subsample,
+            int patience,
+            boolean snapshot,
+            Consumer<String> log)
+            throws Exception {
 
         DMatrix trainMat = null;
         DMatrix valMat = null;
@@ -150,12 +209,14 @@ public class XGBoostModel {
             params.put("tree_method", "hist");
             params.put("verbosity", 0);
 
-            // Train 1 round to create a Booster
             booster = XGBoost.train(trainMat, params, 1, new LinkedHashMap<>(), null, null);
 
             String evalStr = booster.evalSet(new DMatrix[] {valMat}, new String[] {"val"}, 0);
             double bestLoss = parseEvalMetric(evalStr);
             int bestRound = 0;
+            byte[] bestModel = snapshot ? booster.toByteArray() : null;
+            long snapshotNanos = 0;
+            int snapshots = snapshot ? 1 : 0;
 
             for (int round = 1; round < maxRounds; round++) {
                 booster.update(trainMat, round);
@@ -165,6 +226,12 @@ public class XGBoostModel {
                 if (loss < bestLoss) {
                     bestLoss = loss;
                     bestRound = round;
+                    if (snapshot) {
+                        long t0 = System.nanoTime();
+                        bestModel = booster.toByteArray();
+                        snapshotNanos += System.nanoTime() - t0;
+                        snapshots++;
+                    }
                 }
                 if (round - bestRound >= patience) break;
             }
@@ -172,12 +239,14 @@ public class XGBoostModel {
             int actualRounds = bestRound + 1;
             log.accept(String.format(
                     "XGBoost early stopping: best round %d/%d (val loss: %.6f)", actualRounds, maxRounds, bestLoss));
-            return actualRounds;
+            if (snapshot) {
+                log.accept(String.format(
+                        "  kept the round-%d model (%d snapshots, %.2fs, %,d KB) \u2014 saves retraining it",
+                        actualRounds, snapshots, snapshotNanos / 1e9, bestModel == null ? 0 : bestModel.length / 1024));
+            }
+            return new RoundSearch(actualRounds, bestModel);
 
         } finally {
-            // The round-search booster is thrown away — the caller retrains from scratch on the
-            // full dataset. Without an explicit dispose its native handle leaks: Booster.finalize
-            // is deprecated and is not a reliable cleanup path on JDK 25.
             try {
                 if (booster != null) booster.dispose();
             } catch (Exception ignore) {
