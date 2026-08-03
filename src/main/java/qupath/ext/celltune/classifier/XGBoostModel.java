@@ -11,6 +11,7 @@ import ml.dmlc.xgboost4j.java.XGBoost;
 import ml.dmlc.xgboost4j.java.XGBoostError;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.celltune.util.TrainingThreads;
 
 /**
  * Wraps XGBoost4J training and prediction behind a simple interface.
@@ -68,8 +69,11 @@ public class XGBoostModel {
             trainMat.setLabel(labels);
 
             Map<String, Object> params = buildParams(nClasses, maxDepth, eta, subsample);
+            // No watches: XGBoost evaluates every watched matrix once per round, and a "train"
+            // watch here scored the full training matrix on all N rounds with nothing consuming
+            // the result (no callback is passed, and evaluation never feeds back into boosting).
+            // Dropping it leaves the model bit-identical.
             Map<String, DMatrix> watches = new LinkedHashMap<>();
-            watches.put("train", trainMat);
 
             // This build pins the CPU-only xgboost4j artifact (see build.gradle.kts:
             // "ml.dmlc:xgboost4j_2.13"). The CUDA kernels are NOT shipped, so
@@ -134,6 +138,7 @@ public class XGBoostModel {
 
         DMatrix trainMat = null;
         DMatrix valMat = null;
+        Booster booster = null;
         try {
             trainMat = new DMatrix(trainData, trainSize, nFeatures, Float.NaN);
             trainMat.setLabel(trainLabels);
@@ -146,7 +151,7 @@ public class XGBoostModel {
             params.put("verbosity", 0);
 
             // Train 1 round to create a Booster
-            Booster booster = XGBoost.train(trainMat, params, 1, new LinkedHashMap<>(), null, null);
+            booster = XGBoost.train(trainMat, params, 1, new LinkedHashMap<>(), null, null);
 
             String evalStr = booster.evalSet(new DMatrix[] {valMat}, new String[] {"val"}, 0);
             double bestLoss = parseEvalMetric(evalStr);
@@ -170,6 +175,13 @@ public class XGBoostModel {
             return actualRounds;
 
         } finally {
+            // The round-search booster is thrown away — the caller retrains from scratch on the
+            // full dataset. Without an explicit dispose its native handle leaks: Booster.finalize
+            // is deprecated and is not a reliable cleanup path on JDK 25.
+            try {
+                if (booster != null) booster.dispose();
+            } catch (Exception ignore) {
+            }
             try {
                 if (trainMat != null) trainMat.dispose();
             } catch (Exception ignore) {
@@ -396,7 +408,7 @@ public class XGBoostModel {
         p.put("colsample_bytree", 0.8);
         p.put("objective", nClasses == 2 ? "binary:logistic" : "multi:softprob");
         p.put("eval_metric", nClasses == 2 ? "logloss" : "mlogloss");
-        p.put("nthread", Runtime.getRuntime().availableProcessors());
+        p.put("nthread", TrainingThreads.total());
         p.put("seed", 42);
         if (nClasses > 2) p.put("num_class", nClasses);
         return p;

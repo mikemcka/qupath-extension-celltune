@@ -13,6 +13,7 @@ import java.util.ResourceBundle;
 import java.util.Set;
 import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.IntegerProperty;
 import javafx.geometry.Insets;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
@@ -46,6 +47,7 @@ import qupath.ext.celltune.ui.ReviewController;
 import qupath.ext.celltune.ui.ReviewToolbar;
 import qupath.ext.celltune.ui.TrainingTileExtractor;
 import qupath.ext.celltune.util.JvmModuleOpener;
+import qupath.ext.celltune.util.TrainingThreads;
 import qupath.fx.dialogs.Dialogs;
 import qupath.fx.prefs.controlsfx.PropertyItemBuilder;
 import qupath.lib.common.Version;
@@ -76,6 +78,25 @@ public class CellTuneExtension implements QuPathExtension, BinaryClassifierManag
     /** Persistent preference — lets users disable the extension from the Preferences pane. */
     private static final BooleanProperty enableExtensionProperty =
             PathPrefs.createPersistentPreference("celltune.enabled", true);
+
+    /**
+     * Persistent preference — caps how many threads the ML training path uses. 0 means "auto"
+     * (every available processor), matching the behaviour before this preference existed. Useful
+     * on a shared workstation, where letting two native libraries each grab every core makes
+     * everything else unusable while a model trains.
+     */
+    private static final IntegerProperty trainingThreadsProperty =
+            PathPrefs.createPersistentPreference("celltune.trainingThreads", 0);
+
+    static {
+        TrainingThreads.setOverride(trainingThreadsProperty.get());
+        trainingThreadsProperty.addListener((v, o, n) -> TrainingThreads.setOverride(n == null ? 0 : n.intValue()));
+    }
+
+    /** @return the persistent training-thread cap (0 = auto) */
+    public static IntegerProperty trainingThreadsProperty() {
+        return trainingThreadsProperty;
+    }
 
     private boolean isInstalled = false;
 
@@ -634,49 +655,6 @@ public class CellTuneExtension implements QuPathExtension, BinaryClassifierManag
                                     + "Recommended: at least 16 GiB for large panels.",
                             maxHeapGiB)));
         }
-    }
-
-    /**
-     * Estimate peak memory required for training and warn if the current heap
-     * is likely insufficient.
-     *
-     * @param nCells    number of cells to predict
-     * @param nFeatures number of features per cell
-     * @return true if the user confirms to proceed (or memory is sufficient),
-     *         false if they cancel
-     */
-    private boolean checkTrainingMemory(int nCells, int nFeatures) {
-        long maxHeapBytes = Runtime.getRuntime().maxMemory();
-        double maxHeapGiB = maxHeapBytes / (1024.0 * 1024.0 * 1024.0);
-
-        // Feature matrix = nCells × nFeatures × 4 bytes (float)
-        // XGBoost + LightGBM each make a native copy → ~3× the matrix
-        // Plus CellPrediction objects + PopulationSets ~300 MB overhead
-        double matrixGiB = (double) nCells * nFeatures * 4L / (1024.0 * 1024.0 * 1024.0);
-        double estimatedPeakGiB = matrixGiB * 3.0 + 0.3;
-
-        logger.info(
-                "CellTune memory estimate: {} cells x {} features = {} GiB matrix, "
-                        + "{} GiB estimated peak, {} GiB heap available",
-                nCells,
-                nFeatures,
-                String.format("%.1f", matrixGiB),
-                String.format("%.1f", estimatedPeakGiB),
-                String.format("%.1f", maxHeapGiB));
-
-        if (estimatedPeakGiB > maxHeapGiB * 0.8) {
-            return Dialogs.showConfirmDialog(
-                    EXTENSION_NAME,
-                    String.format(
-                            "Memory warning: %,d cells \u00d7 %,d features requires an "
-                                    + "estimated %.1f GiB but the JVM heap is only %.1f GiB.\n\n"
-                                    + "This may cause an OutOfMemoryError.\n"
-                                    + "Increase memory via Edit \u2192 Preferences \u2192 'Max memory' "
-                                    + "or Help \u2192 Show setup options.\n\n"
-                                    + "Proceed anyway?",
-                            nCells, nFeatures, estimatedPeakGiB, maxHeapGiB));
-        }
-        return true;
     }
 
     private void addPreferenceToPane(QuPathGUI qupath) {

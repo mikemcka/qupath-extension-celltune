@@ -494,6 +494,7 @@ public final class HyperparameterTuner {
 
         DMatrix trainMat = null;
         DMatrix testMat = null;
+        Booster booster = null;
         try {
             trainMat = new DMatrix(trainData, trainSize, nFeatures, Float.NaN);
             trainMat.setLabel(trainLabels);
@@ -512,7 +513,7 @@ public final class HyperparameterTuner {
             params.put("verbosity", 0);
             if (nClasses > 2) params.put("num_class", nClasses);
 
-            Booster booster = XGBoost.train(trainMat, params, hp.numRounds(), new LinkedHashMap<>(), null, null);
+            booster = XGBoost.train(trainMat, params, hp.numRounds(), new LinkedHashMap<>(), null, null);
 
             testMat = new DMatrix(testData, testSize, nFeatures, Float.NaN);
             float[][] preds = booster.predict(testMat);
@@ -524,6 +525,12 @@ public final class HyperparameterTuner {
             logger.debug("XGBoost CV fold failed: {}", e.getMessage());
             return -1;
         } finally {
+            // One booster per fold per trial — 100 per tuned model. Each holds a native handle
+            // that Booster.finalize is not a reliable path for releasing on JDK 25.
+            try {
+                if (booster != null) booster.dispose();
+            } catch (Exception ignore) {
+            }
             try {
                 if (trainMat != null) trainMat.dispose();
             } catch (Exception ignore) {

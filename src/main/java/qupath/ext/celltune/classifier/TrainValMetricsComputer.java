@@ -48,6 +48,97 @@ final class TrainValMetricsComputer {
     }
 
     /**
+     * An 80/20 stratified split with the train fold resampled and both folds flattened, ready to
+     * hand to a model.
+     *
+     * @param split      {@code [trainIndices, valIndices]} into the original real rows
+     * @param trainData  row-major resampled train fold
+     * @param trainSize  rows in {@code trainData} (post-resampling, so &ge; {@code split[0].length})
+     * @param valData    row-major validation fold — real rows only, never resampled
+     */
+    record PreparedFold(
+            int[][] split,
+            float[] trainData,
+            float[] trainLabels,
+            int trainSize,
+            float[] valData,
+            float[] valLabels,
+            int valSize) {}
+
+    /**
+     * Builds the 80/20 fold used by both early stopping and the train/val metrics.
+     * <p>
+     * Both callers previously did this independently with the same inputs, the same ratio and the
+     * same seed, so they produced byte-identical folds — including two identical runs of an
+     * O(n²) resampling pass. Sharing one {@code PreparedFold} removes that duplicate work
+     * without changing any value it produces.
+     *
+     * @param strategy resampling applied to the train fold only; the validation fold stays real
+     * @param out      log sink for the resampling messages
+     * @return the prepared fold, or {@code null} if the split was degenerate (an empty fold)
+     */
+    static PreparedFold prepare(
+            List<float[]> realRows,
+            List<Integer> realLabels,
+            int nRealSamples,
+            int nClasses,
+            int nFeatures,
+            ResamplingStrategy strategy,
+            Consumer<String> out) {
+        int[] realIntLabels = new int[nRealSamples];
+        for (int i = 0; i < nRealSamples; i++) realIntLabels[i] = realLabels.get(i);
+
+        int[][] split = stratifiedSplit(realIntLabels, nClasses, 0.8, new Random(42));
+        int valSize = split[1].length;
+        if (valSize == 0 || split[0].length == 0) {
+            return null;
+        }
+
+        // Build the 80% train fold (eligible for resampling); the 20% stays real.
+        List<float[]> trainRows = new ArrayList<>(split[0].length);
+        List<Integer> trainLabelsList = new ArrayList<>(split[0].length);
+        for (int idx : split[0]) {
+            trainRows.add(realRows.get(idx));
+            trainLabelsList.add(realLabels.get(idx));
+        }
+
+        float[] trainData;
+        float[] trainLabels;
+        int trainSize;
+        if (strategy != ResamplingStrategy.NONE) {
+            Resampler.Result res = Resampler.apply(trainRows, trainLabelsList, nClasses, strategy, out);
+            trainSize = res.size();
+            // Straight to the flat matrix — skips materialising an ArrayList of rows and boxing
+            // every label, only to copy them out again.
+            float[][] rows = res.rowArray();
+            int[] labels = res.labelArray();
+            trainData = new float[trainSize * nFeatures];
+            trainLabels = new float[trainSize];
+            for (int i = 0; i < trainSize; i++) {
+                System.arraycopy(rows[i], 0, trainData, i * nFeatures, nFeatures);
+                trainLabels[i] = labels[i];
+            }
+        } else {
+            trainSize = trainRows.size();
+            trainData = new float[trainSize * nFeatures];
+            trainLabels = new float[trainSize];
+            for (int i = 0; i < trainSize; i++) {
+                System.arraycopy(trainRows.get(i), 0, trainData, i * nFeatures, nFeatures);
+                trainLabels[i] = trainLabelsList.get(i);
+            }
+        }
+
+        float[] valData = new float[valSize * nFeatures];
+        float[] valLabels = new float[valSize];
+        for (int i = 0; i < valSize; i++) {
+            System.arraycopy(realRows.get(split[1][i]), 0, valData, i * nFeatures, nFeatures);
+            valLabels[i] = realLabels.get(split[1][i]);
+        }
+
+        return new PreparedFold(split, trainData, trainLabels, trainSize, valData, valLabels, valSize);
+    }
+
+    /**
      * @param realRows        feature rows for the real labelled cells (pre-resampling)
      * @param realLabels      integer class labels parallel to {@code realRows}
      * @param nRealSamples    number of real samples
@@ -80,42 +171,61 @@ final class TrainValMetricsComputer {
             List<String> classNames,
             Consumer<String> out)
             throws Exception {
-        int[] realIntLabels = new int[nRealSamples];
-        for (int i = 0; i < nRealSamples; i++) realIntLabels[i] = realLabels.get(i);
+        return compute(
+                realRows,
+                realLabels,
+                nRealSamples,
+                nClasses,
+                nFeatures,
+                strategy,
+                model1Trainer,
+                model1Predictor,
+                model1Name,
+                model2Trainer,
+                model2Predictor,
+                model2Name,
+                classNames,
+                out,
+                null);
+    }
 
-        int[][] split = stratifiedSplit(realIntLabels, nClasses, 0.8, new Random(42));
-        int valSize = split[1].length;
-        if (valSize == 0 || split[0].length == 0) {
+    /**
+     * @param cached a fold already built by {@link #prepare} for the <em>same</em> rows, labels,
+     *               class count and strategy — reused as-is; pass {@code null} to build one here
+     */
+    static Result compute(
+            List<float[]> realRows,
+            List<Integer> realLabels,
+            int nRealSamples,
+            int nClasses,
+            int nFeatures,
+            ResamplingStrategy strategy,
+            ModelTrainer model1Trainer,
+            ModelPredictor model1Predictor,
+            String model1Name,
+            ModelTrainer model2Trainer,
+            ModelPredictor model2Predictor,
+            String model2Name,
+            List<String> classNames,
+            Consumer<String> out,
+            PreparedFold cached)
+            throws Exception {
+        // Resampling is silent here: when this builds its own fold the caller has not announced
+        // one, and when it reuses a cached fold the messages were already emitted upstream.
+        PreparedFold fold = cached != null
+                ? cached
+                : prepare(realRows, realLabels, nRealSamples, nClasses, nFeatures, strategy, s -> {});
+        if (fold == null) {
             out.accept("Skipping metrics: stratified split produced empty fold.");
             return Result.empty();
         }
 
-        // Build 80% train (eligible for resampling) and 20% val (real only).
-        List<float[]> evTrainRows = new ArrayList<>(split[0].length);
-        List<Integer> evTrainLabelsList = new ArrayList<>(split[0].length);
-        for (int idx : split[0]) {
-            evTrainRows.add(realRows.get(idx));
-            evTrainLabelsList.add(realLabels.get(idx));
-        }
-        if (strategy != ResamplingStrategy.NONE) {
-            Resampler.Result res = Resampler.apply(evTrainRows, evTrainLabelsList, nClasses, strategy, s -> {});
-            evTrainRows = res.rows();
-            evTrainLabelsList = res.labels();
-        }
-
-        int evTrainSize = evTrainRows.size();
-        float[] evTrainData = new float[evTrainSize * nFeatures];
-        float[] evTrainLabels = new float[evTrainSize];
-        for (int i = 0; i < evTrainSize; i++) {
-            System.arraycopy(evTrainRows.get(i), 0, evTrainData, i * nFeatures, nFeatures);
-            evTrainLabels[i] = evTrainLabelsList.get(i);
-        }
-        float[] evValData = new float[valSize * nFeatures];
-        float[] evValLabels = new float[valSize];
-        for (int i = 0; i < valSize; i++) {
-            System.arraycopy(realRows.get(split[1][i]), 0, evValData, i * nFeatures, nFeatures);
-            evValLabels[i] = realLabels.get(split[1][i]);
-        }
+        int valSize = fold.valSize();
+        int evTrainSize = fold.trainSize();
+        float[] evTrainData = fold.trainData();
+        float[] evTrainLabels = fold.trainLabels();
+        float[] evValData = fold.valData();
+        float[] evValLabels = fold.valLabels();
 
         // ── Eval Model 1 ────────────────────────────────────────────────────
         model1Trainer.train(evTrainData, evTrainLabels, evTrainSize);

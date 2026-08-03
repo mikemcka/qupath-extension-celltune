@@ -12,6 +12,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.celltune.util.TrainingThreads;
 
 /**
  * Wraps LightGBM4J training and prediction behind the same style interface
@@ -116,48 +117,35 @@ public class LightGBMModel {
         // Build parameter string
         String params = buildParams(nClasses, maxDepth, learningRate, subsample);
 
-        // Attempt GPU training, fall back to CPU
-        boolean usingGpu = false;
-        try {
-            String gpuParams = params + " device_type=gpu";
-            logger.info("LightGBM: attempting GPU training…");
-            booster = LGBMBooster.create(dataset, gpuParams);
-            for (int i = 0; i < numRounds; i++) {
-                booster.updateOneIter();
+        // This build pins the CPU-only lightgbm4j artifact (see build.gradle.kts:
+        // "io.github.metarank:lightgbm4j"). No GPU kernels are shipped, so device_type=gpu can
+        // never succeed. The previous probe-and-fallback ran a *full* numRounds loop under GPU
+        // params on every train() call before failing — and if it failed part-way through, that
+        // work was discarded and CPU training restarted from round 0. Always train on CPU here.
+        // If/when a GPU artifact is wired in, restore the probe-and-fallback logic.
+        // (Same reasoning, same conclusion, as XGBoostModel.train.)
+        booster = LGBMBooster.create(dataset, params);
+        int rounds = 0;
+        for (int i = 0; i < numRounds; i++) {
+            rounds++;
+            // updateOneIter returns LightGBM's is_finished: with min_gain_to_split set, no split
+            // may be worth making any more, and every further call is a no-op.
+            if (booster.updateOneIter()) {
+                break;
             }
-            usingGpu = true;
-            logger.info(
-                    "LightGBM training: GPU — {} samples, {} features, {} classes, {} rounds",
-                    nSamples,
-                    nFeatures,
-                    nClasses,
-                    numRounds);
-        } catch (Exception gpuEx) {
-            logger.info("LightGBM GPU not available ({}), falling back to CPU", gpuEx.getMessage());
-            // Re-create booster with CPU params
-            if (booster != null) {
-                try {
-                    booster.close();
-                } catch (Exception ignore) {
-                }
-            }
-            booster = LGBMBooster.create(dataset, params);
-            for (int i = 0; i < numRounds; i++) {
-                booster.updateOneIter();
-            }
-            logger.info(
-                    "LightGBM training: CPU — {} samples, {} features, {} classes, {} rounds",
-                    nSamples,
-                    nFeatures,
-                    nClasses,
-                    numRounds);
         }
+        logger.info(
+                "LightGBM training: CPU — {} samples, {} features, {} classes, {} of {} rounds",
+                nSamples,
+                nFeatures,
+                nClasses,
+                rounds,
+                numRounds);
 
         // Close dataset — booster keeps its own copy
         dataset.close();
 
-        logger.info("LightGBM training complete ({})", usingGpu ? "GPU" : "CPU");
-        lastDevice = usingGpu ? "GPU" : "CPU";
+        lastDevice = "CPU";
     }
 
     /** @return the device used for the last training run */
@@ -196,22 +184,61 @@ public class LightGBMModel {
         String params = buildParams(nClasses, maxDepth, learningRate, subsample);
         LGBMBooster booster = LGBMBooster.create(dataset, params);
 
+        // Register the validation fold with the booster so LightGBM scores it natively. It keeps
+        // a running raw score per validation row and adds only the new trees each iteration, so
+        // the whole search costs O(rounds); calling predictForMat per round instead re-scored
+        // every tree from scratch and re-marshalled the fold across JNI, making it O(rounds²).
+        //
+        // The reference dataset is mandatory, not cosmetic: LightGBM rejects a validation set
+        // whose feature bin mappers differ from the training set's.
+        LGBMDataset valDataset = null;
+        int metricIdx = -1;
+        try {
+            valDataset = LGBMDataset.createFromMat(valData, valSize, nFeatures, true, "", dataset);
+            valDataset.setField("label", valLabels);
+            booster.addValidData(valDataset);
+            metricIdx = resolveMetricIndex(booster.getEvalNames(), nClasses);
+        } catch (Exception ex) {
+            logger.info("LightGBM native validation metric unavailable ({}); scoring manually", ex.getMessage());
+            metricIdx = -1;
+        }
+
         try {
             double bestLoss = Double.MAX_VALUE;
             int bestRound = 0;
+            // Decided once rather than per round: a mid-search switch would mix two metrics into
+            // one comparison, and this way the change can never be slower than the old path.
+            boolean useNative = metricIdx >= 0;
 
             for (int round = 0; round < maxRounds; round++) {
-                booster.updateOneIter();
+                boolean finished = booster.updateOneIter();
 
-                double[] preds =
-                        booster.predictForMat(valData, valSize, nFeatures, true, PredictionType.C_API_PREDICT_NORMAL);
-                double loss = computeLogloss(preds, valLabels, valSize, nClasses);
+                double loss = Double.NaN;
+                if (useNative) {
+                    try {
+                        double[] evals = booster.getEval(1); // 0 = training data, 1 = first valid set
+                        loss = (metricIdx < evals.length) ? evals[metricIdx] : Double.NaN;
+                    } catch (Exception ex) {
+                        loss = Double.NaN;
+                    }
+                    if (!Double.isFinite(loss)) {
+                        logger.info("LightGBM getEval returned no usable value; falling back to manual scoring");
+                        useNative = false;
+                    }
+                }
+                if (!useNative) {
+                    double[] preds = booster.predictForMat(
+                            valData, valSize, nFeatures, true, PredictionType.C_API_PREDICT_NORMAL);
+                    loss = computeLogloss(preds, valLabels, valSize, nClasses);
+                }
 
                 if (loss < bestLoss) {
                     bestLoss = loss;
                     bestRound = round;
                 }
                 if (round - bestRound >= patience) break;
+                // LightGBM has nothing left to add — further rounds cannot change the result.
+                if (finished) break;
             }
 
             int actualRounds = bestRound + 1;
@@ -221,8 +248,41 @@ public class LightGBMModel {
 
         } finally {
             booster.close();
+            if (valDataset != null) {
+                try {
+                    valDataset.close();
+                } catch (Exception ignore) {
+                }
+            }
             dataset.close();
         }
+    }
+
+    /**
+     * Picks the index of the log-loss metric among the booster's configured eval metrics.
+     * <p>
+     * {@code buildParams} configures exactly one ({@code binary_logloss} or {@code multi_logloss},
+     * matching {@link #computeLogloss}), but the name is matched rather than assumed so that
+     * adding a metric later cannot silently start early-stopping on the wrong one.
+     *
+     * @return the index, or {@code -1} if no log-loss metric is present
+     */
+    static int resolveMetricIndex(String[] evalNames, int nClasses) {
+        if (evalNames == null || evalNames.length == 0) {
+            return -1;
+        }
+        String expected = nClasses == 2 ? "binary_logloss" : "multi_logloss";
+        for (int i = 0; i < evalNames.length; i++) {
+            if (expected.equals(evalNames[i])) {
+                return i;
+            }
+        }
+        for (int i = 0; i < evalNames.length; i++) {
+            if (evalNames[i] != null && evalNames[i].endsWith("logloss")) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /** Compute mean log-loss from raw LightGBM predictions. */
@@ -435,7 +495,7 @@ public class LightGBMModel {
         sb.append(" bagging_freq=1");
         sb.append(" feature_fraction=0.8");
         sb.append(" min_gain_to_split=10");
-        sb.append(" num_threads=").append(Runtime.getRuntime().availableProcessors());
+        sb.append(" num_threads=").append(TrainingThreads.total());
         sb.append(" seed=42");
         sb.append(" verbosity=-1"); // suppress LightGBM logs
         return sb.toString();
