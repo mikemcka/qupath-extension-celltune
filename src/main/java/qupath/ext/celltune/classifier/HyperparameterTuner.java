@@ -563,11 +563,10 @@ public final class HyperparameterTuner {
 
             booster = LGBMBooster.create(dataset, params);
             for (int i = 0; i < hp.numRounds(); i++) {
-                // is_finished — with min_gain_to_split now applied, folds routinely run out of
-                // splits worth making well before numRounds, and every further call is a no-op.
-                if (booster.updateOneIter()) {
-                    break;
-                }
+                // is_finished is deliberately ignored — see LightGBMModel.train(). It marks a
+                // barren iteration, not convergence, so breaking on it would score a truncated
+                // model and hand its round count to a full one.
+                booster.updateOneIter();
             }
 
             double[] rawPreds =

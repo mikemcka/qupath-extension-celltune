@@ -111,12 +111,18 @@ scoring what gets deployed. Default runs are untouched: the tuner only runs with
 - [ ] Auto-tune should also be somewhat faster: with `min_gain_to_split` applied, folds run out of
       worthwhile splits and stop early instead of grinding through every round as no-ops.
 
-## 9. LightGBM early stopping (the one non-bit-identical change)
+## 9. LightGBM early stopping
 
-Early stopping now reads LightGBM's own log-loss instead of a hand-rolled one.
+Early stopping now reads LightGBM's own log-loss instead of a hand-rolled one. This was originally
+written up as "the one non-bit-identical change"; it is no longer. `LightGBMBestRoundParityTest`
+runs the old scoring loop as an oracle and asserts the same `bestRound` on binary, 8-class and
+35-class fixtures, so §2 should diff to **zero**, not "close enough".
 
-- [ ] With Early stopping on, the log's `LightGBM early stopping: best round N/M` line reports a
-      plausible N, and training does not regress in quality (compare macro-F1 with a pre-change
-      run).
-- [ ] Optional deeper check: if N differs from the old run, confirm the resulting validation
-      macro-F1 is equivalent. A shift of a round or two is acceptable; a quality drop is not.
+That test also caught a real bug in the first version of this work: both loops broke out on
+`updateOneIter()`'s return value, on the assumption that it means "converged". It does not — it
+marks a single barren iteration, and with bagging on, productive ones follow. It was truncating
+both the round search and the deployed model.
+
+- [ ] `LightGBM early stopping: best round N/M` reports the **same N** as the baseline JAR on the
+      same data. A difference here is a defect, not a tolerance — bring the two logs.
+- [ ] `Training LightGBM (N rounds)…` reports the same N as the baseline, and macro-F1 matches.

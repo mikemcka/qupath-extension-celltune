@@ -125,21 +125,21 @@ public class LightGBMModel {
         // If/when a GPU artifact is wired in, restore the probe-and-fallback logic.
         // (Same reasoning, same conclusion, as XGBoostModel.train.)
         booster = LGBMBooster.create(dataset, params);
-        int rounds = 0;
         for (int i = 0; i < numRounds; i++) {
-            rounds++;
-            // updateOneIter returns LightGBM's is_finished: with min_gain_to_split set, no split
-            // may be worth making any more, and every further call is a no-op.
-            if (booster.updateOneIter()) {
-                break;
-            }
+            // Do NOT break on updateOneIter()'s return. It is LightGBM's is_finished, and the
+            // tempting reading — "no split is worth making any more, so the rest are no-ops" — is
+            // wrong. It reports that *this iteration* added nothing, not that training has
+            // converged. With min_gain_to_split=10 and bagging_freq=1 the row sample changes every
+            // iteration, so a barren iteration is routinely followed by productive ones: measured
+            // on a multiclass fixture it went true at round 72, false again at 100, and validation
+            // loss kept improving to round 119. Breaking on it silently truncates the model.
+            booster.updateOneIter();
         }
         logger.info(
-                "LightGBM training: CPU — {} samples, {} features, {} classes, {} of {} rounds",
+                "LightGBM training: CPU — {} samples, {} features, {} classes, {} rounds",
                 nSamples,
                 nFeatures,
                 nClasses,
-                rounds,
                 numRounds);
 
         // Close dataset — booster keeps its own copy
@@ -219,7 +219,10 @@ public class LightGBMModel {
             boolean useNative = metricIdx >= 0;
 
             for (int round = 0; round < maxRounds; round++) {
-                boolean finished = booster.updateOneIter();
+                // The return value (is_finished) is deliberately ignored — see train(). It marks a
+                // barren iteration, not convergence, and stopping on it cut the search short by
+                // dozens of rounds while validation loss was still falling.
+                booster.updateOneIter();
 
                 double loss = Double.NaN;
                 if (useNative) {
@@ -245,8 +248,6 @@ public class LightGBMModel {
                     bestRound = round;
                 }
                 if (round - bestRound >= patience) break;
-                // LightGBM has nothing left to add — further rounds cannot change the result.
-                if (finished) break;
             }
 
             int actualRounds = bestRound + 1;
