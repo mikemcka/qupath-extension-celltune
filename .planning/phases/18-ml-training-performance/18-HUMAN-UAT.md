@@ -77,24 +77,22 @@ only valid when the hyperparameters have not moved since, and auto-tune replaces
 - [ ] Re-run with Auto-tune OFF: the "kept the round-N model" line *should* appear, and the
       train/val metrics should be unchanged from a pre-change run.
 
-## 7. XGBoost `max_bin` — a speed/accuracy trade you have to price yourself
+## 7. XGBoost `max_bin` — optional, and not the intended configuration
 
-XGBoost is ~87% of a training run and `max_bin` is the only remaining lever on it. Off by default
-(Edit → Preferences → CellTune → **XGBoost histogram bins**, 0 = XGBoost's own 256), because
-**it changes predictions**. The benchmark measured 2.0× at 128 bins and 2.6× at 64 on the real
-shape, but on synthetic data — the timing ratios transfer, the accuracy effect does not.
+**Product decision: the default stays.** CellTune's users want the most accurate result and accept
+a longer wait, so 256 bins (`celltune.xgbMaxBin` = 0) is what ships and what should be used. The
+preference exists as an escape hatch for someone with a very large panel and a deadline, not as a
+tuning knob to sweep.
 
-Do this **after** §2, so the baseline diff is done against unmodified defaults.
+So this section is **optional** — nothing here gates the merge. The only check that matters for the
+shipped configuration:
 
-- [ ] With bins = 0, note the training log's `fit XGBoost` and `early stop: XGBoost` times, the
-      `Macro F1` line, and export the cell table.
-- [ ] Set bins = 128, retrain. Confirm the header records `XGB max_bin: 128` — a log without that
-      line cannot be compared against another.
-- [ ] Expect roughly half the XGBoost time. Compare macro-F1 and diff the exported class column
-      against the bins = 0 export: **predictions will differ** — the question is by how much and
-      whether the disagreements land on cells you care about.
-- [ ] Repeat at 64 if 128 looks acceptable. Keep whichever setting trades time for accuracy in the
-      direction you want; there is no correct answer here, only your answer for this panel.
+- [ ] The training log header reads `XGB max_bin: 256 (default)`. That is the accurate setting, and
+      it is what every other log in this checklist should show.
+
+If you ever do want to price the trade (2.0× at 128, 2.6× at 64 measured on the real shape, but the
+accuracy side was measured on synthetic data and does not transfer): train at 0, export the cell
+table, retrain at 128, and diff the predicted class column. Predictions **will** differ.
 
 ## 8. Auto-tune now tunes the real model
 
