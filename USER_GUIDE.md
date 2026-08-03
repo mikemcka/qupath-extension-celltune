@@ -1171,19 +1171,26 @@ Under **Edit → Preferences → CellTune Classifier**. These are set once and l
 | Preference | Default | What it does |
 |---|---|---|
 | **Enable** | ✅ | Turn the extension off without uninstalling it. |
-| **XGBoost histogram bins** | 0 | How finely one model examines each measurement. 0 means "use the standard setting". |
+| **XGBoost histogram bins** | 0 | How many different cut-off values the model tries per measurement. 0 means "use the standard setting" (256). |
 
 **XGBoost histogram bins — trading a little accuracy for a lot of speed.**
 
-Most of your training time is spent building one of the two models. Lowering this number makes it look at each measurement more coarsely, which is much faster: **128 is about twice as fast, 64 about two and a half times.**
+*What they are.* The classifier works by asking yes/no questions about one measurement at a time — *"is this cell's CD8 above 412?"* To find a good cut-off it has to try candidates. Trying every value in your data would be exact but painfully slow, so instead it sorts your cells by that measurement, chops them into buckets, and only tries the cut-offs *between* buckets. The bin count is how many buckets.
 
-The catch is that it **changes your results**. That's why it's off by default. It isn't simply "faster but worse" — a coarser look can filter out noise, and in testing 64 sometimes scored slightly *better*. But that was on artificial data, so only the speed figures are reliable. You have to try it on your own panel.
+- **256** (standard) → a possible cut-off at roughly every 0.4% of your cells.
+- **64** → a possible cut-off at roughly every 1.6% of your cells.
 
-If you want to:
+*Why fewer is faster.* The model does this for every measurement, at every branch, of every tree — on a 1,886-marker panel that's an enormous number of cut-offs to test. Fewer candidates means proportionally less work: **128 is about twice as fast, 64 about two and a half times.**
 
-1. Train as normal and look at your Training Metrics, then export the cell table.
+*Why fewer isn't automatically worse.* Measurements are noisy, so whether the cut-off lands at 412 or 415 rarely matters — and the extra precision can make the model chase noise in your training cells that doesn't hold up elsewhere. In testing, 64 sometimes scored slightly *better*.
+
+*When it would hurt.* If two cell types are separated by a **narrow intensity window** on some marker and that window falls inside a single bucket, the model can't cut there. At 64 bins a bucket holds about 1.6% of your cells, so the window has to be very tight for this to bite — but it's the thing to watch if you have a population defined by a subtle intensity difference.
+
+It **changes your results**, which is why it's off by default. The speed figures above are reliable; the accuracy effect was measured on artificial data, so you have to try it on your own panel:
+
+1. Train as normal, note your Training Metrics, and export the cell table.
 2. Set the number to 128 and train again. The log header will show `XGB max_bin: 128`.
-3. Compare the scores, and compare the two exported class columns. Some cells **will** be classified differently — the question is whether it's cells you care about.
+3. Compare the scores, and compare the two exported class columns. Some cells **will** be classified differently — the question is whether they're cells you care about.
 4. If 128 looks fine, try 64.
 
 There's no right answer here, just the trade you're happy with.
