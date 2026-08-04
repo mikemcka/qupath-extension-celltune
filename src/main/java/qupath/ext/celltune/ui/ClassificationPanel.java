@@ -144,7 +144,10 @@ public class ClassificationPanel extends VBox {
         });
 
         // ── Hyperparameter controls ──
-        roundsSpinner = new Spinner<>(50, 1000, 200, 50);
+        // A ceiling, not a target: with early stopping on (default) models stop when they stop
+        // improving, so 500 is free for one that converges early and rescues one that doesn't.
+        // Only a literal count when early stopping is off — see the tooltip.
+        roundsSpinner = new Spinner<>(50, 1000, 500, 50);
         roundsSpinner.setEditable(true);
         roundsSpinner.setPrefWidth(90);
         roundsSpinner.setTooltip(new Tooltip(STRINGS.getString("param.num_rounds.help")));

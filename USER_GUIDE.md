@@ -301,7 +301,7 @@ This is a quick way to reduce prediction times but only focusing on one or a few
 Two speed controls. They do different jobs, so they are separate numbers. (Labels get cut off in a narrow panel — widen it, or hover for the full text.)
 
 **CPU threads — makes training faster.**
-Leave at **0**, which means "use the whole computer". Lower it only if you want to keep working in QuPath while a long training run happens in the background, or if you're sharing a compute node with someone. Your choice is remembered next time.
+Leave at **0**, which means "use all CPU resources. Lower it only if you want to keep working in QuPath while a long training run happens in the background, or if you're sharing a compute node with someone. Your choice is remembered next time.
 
 > One thing to know: changing this number can nudge the results very slightly. Neither setting is more correct. If you're comparing two training runs, just use the same number for both.
 
@@ -347,7 +347,13 @@ Defaults work for ~90% of cases. Switch to `SMOTE` alone if Tomek is removing to
 
 **Training uses the CPU, not the graphics card.** Both models report `CPU` in the progress dialog. A GPU wouldn't help at this scale anyway — it only starts to pay off with far more labelled cells than a typical panel has.
 
-**Rounds / Max depth.** Default 200 rounds, depth 6. Together with early stopping, this is almost always enough. Increase rounds to 500 if early stopping is firing very late.
+**Rounds / Max depth.** Default 500 rounds, depth 6.
+
+**Rounds is a limit, not a target** — as long as **Early stopping** is on (it is by default). Each model keeps adding rounds until it stops getting better, then stops on its own. So a model that only needs 130 rounds uses 130 and the setting costs you nothing; a model that would still be improving at 200 is no longer cut off. That's why the default is generous.
+
+> ⚠️ **If you untick Early stopping, this becomes a literal count** and every round is trained. 500 rounds will then take much longer than 200. Lower it if you turn early stopping off.
+
+The training log tells you what each model actually used: `best round 127/500` means it converged comfortably, while a number close to your limit means it was still improving and you could raise it further.
 
 ### 5.5 Train
 
@@ -1139,9 +1145,9 @@ Deletes the project's entire `celltune/` folder: all labels and per-image label 
 
 | Control | Default | What it does |
 |---|---|---|
-| **Rounds** | 200 | Boosting iterations (50–1000). Increase for complex data; decrease for fast trials. |
+| **Rounds** | 500 | Maximum boosting rounds (50–1000). With Early stopping on this is a **limit**, not a target — models stop when they stop improving, so it usually costs nothing. With Early stopping **off** it is used literally; lower it. |
 | **Max depth** | 6 | Tree depth (2–15). Higher = more complex interactions, more overfit risk. |
-| **CPU threads** | 0 (all) | How much of the computer training may use. 0 = all of it. Lower it to keep working while training runs. Remembered between sessions. See §5.3. |
+| **CPU threads** | 0 (all) | How many compute resources training may use. 0 = all of it. Lower it to keep working while training runs. Remembered between sessions. See §5.3. |
 | **Images at once** | 1 | How many images are classified at once *after* training (1–8). Uses memory, not processor. Doesn't affect training itself. |
 | **Model 1** | XGBoost | First ensemble model. |
 | **Model 2** | LightGBM | Second ensemble model. **Pick a different type** for meaningful disagreement. |
