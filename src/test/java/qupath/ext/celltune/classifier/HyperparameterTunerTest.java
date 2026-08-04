@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -123,5 +124,186 @@ class HyperparameterTunerTest {
         var result = HyperparameterTuner.tune(d, l, 10, N_FEATURES, N_CLASSES, 5, 3, s -> {});
         assertEquals(200, result.xgbParams().numRounds());
         assertEquals(6, result.xgbParams().maxDepth());
+    }
+
+    // ── Class balancing happens inside the fold ─────────────────────────────────
+
+    /**
+     * The leak this guards against: balancing the whole dataset and splitting afterwards puts
+     * SMOTE's synthetic rows — each an interpolation of two real rows — into the fold being scored
+     * while their parents sit in the fold being trained on. The search then reads back its own
+     * training data, and rewards whichever settings memorise hardest.
+     * <p>
+     * Both properties are asserted from one run because they are two halves of the same fix: the
+     * resampler must see fold-sized training portions (after the split, not before), and it must
+     * see them once per fold rather than once per trial per fold.
+     */
+    @Test
+    @DisplayName("balancing is applied per fold's training rows, once, never to the whole dataset")
+    void foldResamplerRunsOncePerFoldOnTrainingRowsOnly() {
+        int nFolds = 4;
+        int nTrials = 3;
+        List<Integer> sizesSeen = Collections.synchronizedList(new ArrayList<>());
+
+        HyperparameterTuner.FoldResampler recording = (data, labels, size) -> {
+            sizesSeen.add(size);
+            return new HyperparameterTuner.Resampled(data, labels, size); // identity
+        };
+
+        HyperparameterTuner.tune(
+                data(), labels(), N_SAMPLES, N_FEATURES, N_CLASSES, nTrials, nFolds, 60, 60, recording, s -> {});
+
+        assertEquals(
+                nFolds,
+                sizesSeen.size(),
+                "balancing must run once per fold during preparation, not once per trial per fold — "
+                        + "re-running it per trial repeats the most expensive phase of a run");
+
+        for (int size : sizesSeen) {
+            assertTrue(
+                    size < N_SAMPLES,
+                    "the resampler was handed " + size + " of " + N_SAMPLES + " rows — it must see one fold's"
+                            + " training portion, which means the split already happened");
+        }
+
+        int total = sizesSeen.stream().mapToInt(Integer::intValue).sum();
+        assertEquals(
+                N_SAMPLES * (nFolds - 1),
+                total,
+                "every row must appear in exactly k-1 training folds; a different total means the"
+                        + " training portions are not a clean complement of the scored folds");
+    }
+
+    @Test
+    @DisplayName("with no resampler the tuner still runs")
+    void absentResamplerIsAllowed() {
+        var result = HyperparameterTuner.tune(
+                data(), labels(), N_SAMPLES, N_FEATURES, N_CLASSES, 3, 3, 60, 60, null, s -> {});
+        assertNotNull(result);
+        assertEquals(60, result.xgbParams().numRounds());
+    }
+
+    // ── Leaf-bounded depth search ──────────────────────────────────────────────
+
+    @Test
+    @DisplayName("the depth ceiling is derived from the leaf cap, not hard-coded")
+    void leafBoundedDepthTracksTheLeafCap() {
+        // 2^5 = 32 is the first power of two to reach LightGBM's default 31 leaves, so depths
+        // beyond 5 describe the same tree.
+        assertEquals(5, HyperparameterTuner.leafBoundedDepth(31));
+        assertEquals(2, HyperparameterTuner.leafBoundedDepth(4), "2^2 already reaches a 4-leaf cap");
+        assertEquals(10, HyperparameterTuner.leafBoundedDepth(1000));
+        assertEquals(
+                12,
+                HyperparameterTuner.leafBoundedDepth(1 << 20),
+                "a cap past the search space must clamp to DEPTH_MAX rather than run away");
+    }
+
+    // ── Fold count follows the rarest class ────────────────────────────────────
+
+    /** The balanced label vector {@link #labels()} produces, as the int[] the guard takes. */
+    private static int[] balancedIntLabels() {
+        int[] out = new int[N_SAMPLES];
+        for (int i = 0; i < N_SAMPLES; i++) out[i] = i % N_CLASSES;
+        return out;
+    }
+
+    private static int[] labelsWithRarestClassOf(int rarest) {
+        // Class 0 is the rare one; the rest split what remains.
+        int[] out = new int[N_SAMPLES];
+        for (int i = 0; i < N_SAMPLES; i++) out[i] = 1 + (i % (N_CLASSES - 1));
+        for (int i = 0; i < rarest; i++) out[i] = 0;
+        return out;
+    }
+
+    @Test
+    @DisplayName("folds are clamped to what the rarest class can support, and the clamp is announced")
+    void foldCountFollowsTheRarestClass() {
+        List<String> log = new ArrayList<>();
+        int folds = HyperparameterTuner.resolveFolds(labelsWithRarestClassOf(3), N_CLASSES, 5, log::add);
+
+        assertEquals(3, folds, "5 folds cannot each train on a 3-row class");
+        assertTrue(
+                log.stream().anyMatch(s -> s.contains("least populated")),
+                "a silent clamp is worse than none — the run must say why it used fewer folds: " + log);
+    }
+
+    @Test
+    @DisplayName("a well-populated rarest class leaves the requested fold count alone")
+    void foldCountIsUntouchedWhenEveryClassIsWellPopulated() {
+        List<String> log = new ArrayList<>();
+        assertEquals(5, HyperparameterTuner.resolveFolds(balancedIntLabels(), N_CLASSES, 5, log::add));
+        assertTrue(log.isEmpty(), "nothing to warn about when every class clears the fold count: " + log);
+    }
+
+    @Test
+    @DisplayName("a single-row class cannot be scored at all, and is called out rather than clamped away")
+    void singleRowClassIsReportedAsUnscoreable() {
+        List<String> log = new ArrayList<>();
+        int folds = HyperparameterTuner.resolveFolds(labelsWithRarestClassOf(1), N_CLASSES, 5, log::add);
+
+        assertEquals(2, folds, "the fold count must not drop below a two-way split");
+        assertTrue(
+                log.stream().anyMatch(s -> s.contains("too few for cross-validation")),
+                "a class no fold can train on must be named, not silently scored as a failure: " + log);
+    }
+
+    @Test
+    @DisplayName("classes with no labelled rows do not drag the fold count down")
+    void unlabelledClassesAreIgnoredByTheFoldGuard() {
+        List<String> log = new ArrayList<>();
+        // Declared class count exceeds what is actually labelled — a class the user added but has
+        // not labelled yet says nothing about how finely the labelled data can be split.
+        assertEquals(5, HyperparameterTuner.resolveFolds(balancedIntLabels(), N_CLASSES + 3, 5, log::add));
+        assertTrue(log.isEmpty(), "an unlabelled class is not a rare class: " + log);
+    }
+
+    // ── Column sampling is searched ────────────────────────────────────────────
+
+    @Test
+    @DisplayName("colsample is searched, inside its bounds")
+    void colsampleIsSearchedWithinBounds() {
+        List<String> log = new ArrayList<>();
+        HyperparameterTuner.tune(data(), labels(), N_SAMPLES, N_FEATURES, N_CLASSES, 8, 3, 60, 60, log::add);
+
+        List<String> trials = trialLines(log);
+        assertTrue(trials.size() >= 8, "expected trial lines, got: " + trials);
+
+        long distinct = trials.stream()
+                .map(s -> s.substring(s.indexOf("colsample=")))
+                .distinct()
+                .count();
+        assertTrue(distinct > 1, "colsample never varied — the dimension is not being searched: " + trials);
+
+        for (String line : trials) {
+            double col = Double.parseDouble(
+                    line.substring(line.indexOf("colsample=") + 10).split("[^0-9.]")[0]);
+            assertTrue(
+                    col >= HyperparameterTuner.COL_MIN - 1e-6 && col <= HyperparameterTuner.COL_MAX + 1e-6,
+                    "colsample " + col + " escaped its bounds: " + line);
+        }
+    }
+
+    @Test
+    @DisplayName("LightGBM trials stay inside the depth range its leaf cap can distinguish")
+    void lightGbmDepthSearchStopsAtTheLeafBound() {
+        List<String> log = new ArrayList<>();
+        HyperparameterTuner.tune(data(), labels(), N_SAMPLES, N_FEATURES, N_CLASSES, 8, 3, 60, 60, log::add);
+
+        int bound = HyperparameterTuner.leafBoundedDepth(LightGBMModel.NUM_LEAVES);
+        boolean inLightGbm = false;
+        int lightGbmTrials = 0;
+        for (String line : log) {
+            if (line.contains("Tuning LightGBM")) inLightGbm = true;
+            if (!inLightGbm || !line.contains("Trial ")) continue;
+            lightGbmTrials++;
+            int depth = Integer.parseInt(
+                    line.substring(line.indexOf("depth=") + 6, line.indexOf(",", line.indexOf("depth="))));
+            assertTrue(
+                    depth <= bound,
+                    "a LightGBM trial searched depth " + depth + " above the leaf-bound " + bound
+                            + "; those trials re-score a model identical to depth " + bound + ": " + line);
+        }
+        assertTrue(lightGbmTrials > 0, "no LightGBM trial lines were logged: " + log);
     }
 }

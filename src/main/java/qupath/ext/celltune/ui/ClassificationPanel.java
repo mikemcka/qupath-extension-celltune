@@ -14,6 +14,7 @@ import qupath.ext.celltune.CellTuneExtension;
 import qupath.ext.celltune.classifier.DataPoolingService;
 import qupath.ext.celltune.classifier.DualModelClassifier;
 import qupath.ext.celltune.classifier.FeaturePruner;
+import qupath.ext.celltune.classifier.HyperparameterTuner;
 import qupath.ext.celltune.classifier.ModelType;
 import qupath.ext.celltune.classifier.ResamplingStrategy;
 import qupath.ext.celltune.classifier.UncertaintySampler;
@@ -94,6 +95,8 @@ public class ClassificationPanel extends VBox {
     private final ComboBox<ModelType> model1Combo = new ComboBox<>();
     private final ComboBox<ModelType> model2Combo = new ComboBox<>();
     private final CheckBox autoTuneCheckBox = new CheckBox("Auto-tune hyperparameters");
+    private final Spinner<Integer> tuneTrialsSpinner;
+    private final Spinner<Integer> tuneFoldsSpinner;
     private final CheckBox earlyStopCheckBox = new CheckBox("Early stopping");
     private final CheckBox computeMetricsCheckBox = new CheckBox("Train/val metrics");
     private final CheckBox autoPruneCheckBox = new CheckBox("Auto-prune features (drop near-constant & redundant)");
@@ -242,6 +245,34 @@ public class ClassificationPanel extends VBox {
                 new Tooltip(
                         "TPE Bayesian optimisation with cross-validation to find optimal hyperparameters independently per model"));
 
+        // Trials and folds set the cost of a search: 2 x trials x folds model fits. They were
+        // fixed at 20 x 5 = 200 fits, which is hours on a wide panel with no way to ask for less.
+        tuneTrialsSpinner = new Spinner<>(5, 100, HyperparameterTuner.DEFAULT_TRIALS, 5);
+        tuneTrialsSpinner.setEditable(true);
+        tuneTrialsSpinner.setPrefWidth(70);
+        tuneTrialsSpinner.setTooltip(new Tooltip("How many hyperparameter combinations to try per model.\n\n"
+                + "The first 5 are random; after that the search uses what it has\n"
+                + "learned, so very low counts are close to a random guess.\n\n"
+                + "Cost is 2 × trials × folds model fits in total."));
+
+        tuneFoldsSpinner = new Spinner<>(2, 10, HyperparameterTuner.DEFAULT_FOLDS, 1);
+        tuneFoldsSpinner.setEditable(true);
+        tuneFoldsSpinner.setPrefWidth(70);
+        tuneFoldsSpinner.setTooltip(new Tooltip("How many cross-validation folds score each combination.\n\n"
+                + "More folds is a steadier score and a proportionally longer run.\n"
+                + "Reduced automatically if your rarest class has fewer labelled\n"
+                + "cells than the number of folds — see the training log."));
+
+        Label tuneTrialsLabel = new Label("Trials:");
+        Label tuneFoldsLabel = new Label("CV folds:");
+        HBox tuneRow = new HBox(8, tuneTrialsLabel, tuneTrialsSpinner, tuneFoldsLabel, tuneFoldsSpinner);
+        tuneRow.setAlignment(Pos.CENTER_LEFT);
+        tuneRow.setPadding(new Insets(0, 0, 0, 20));
+        // Only meaningful with auto-tune on, and it is off by default — keep the row out of the
+        // way until it can do something.
+        tuneRow.visibleProperty().bind(autoTuneCheckBox.selectedProperty());
+        tuneRow.managedProperty().bind(autoTuneCheckBox.selectedProperty());
+
         computeMetricsCheckBox.setSelected(true);
         computeMetricsCheckBox.setTooltip(
                 new Tooltip("Train an extra evaluation copy of each model on an 80/20 split to produce the per-class\n"
@@ -353,6 +384,7 @@ public class ClassificationPanel extends VBox {
                         poolImagesCheckBox,
                         balancingRow,
                         autoTuneCheckBox,
+                        tuneRow,
                         earlyStopCheckBox,
                         computeMetricsCheckBox,
                         showFeatureImportanceCheckBox,
@@ -770,28 +802,45 @@ public class ClassificationPanel extends VBox {
         final String logTitle =
                 activeBinaryMarker != null ? "Binary training — " + activeBinaryMarker : "Multi-class training";
         final List<String[]> logSettings = TrainingLogRecorder.settings(
-                "Cells", detections.size(),
-                "Labelled", labelStore.size(),
-                "Features", featureNames.size(),
+                "Cells",
+                detections.size(),
+                "Labelled",
+                labelStore.size(),
+                "Features",
+                featureNames.size(),
                 // Scoped explicitly: pooling adds classes from other images, so this is
                 // routinely lower than the "N classes" the classifier goes on to report,
                 // which read like a contradiction sitting next to each other.
-                "Classes (image)", labelStore.getClassNames().size(),
-                "Balancing", getEffectiveResamplingStrategy(),
-                "Early stop", earlyStopCheckBox.isSelected(),
-                "Metrics", computeMetricsCheckBox.isSelected(),
-                "Auto-tune", autoTuneCheckBox.isSelected(),
-                "Auto-prune", autoPruneCheckBox.isSelected(),
-                "Pool images", poolImagesCheckBox.isSelected(),
-                "Model 1", classifier.getModel1Type(),
-                "Model 2", classifier.getModel2Type(),
-                "CPU threads", TrainingThreads.total(),
-                "Images at once", workersSpinner.getValue(),
+                "Classes (image)",
+                labelStore.getClassNames().size(),
+                "Balancing",
+                getEffectiveResamplingStrategy(),
+                "Early stop",
+                earlyStopCheckBox.isSelected(),
+                "Metrics",
+                computeMetricsCheckBox.isSelected(),
+                "Auto-tune",
+                autoTuneCheckBox.isSelected()
+                        ? "yes (" + tuneTrialsSpinner.getValue() + " trials x " + tuneFoldsSpinner.getValue()
+                                + " folds)"
+                        : "no",
+                "Auto-prune",
+                autoPruneCheckBox.isSelected(),
+                "Pool images",
+                poolImagesCheckBox.isSelected(),
+                "Model 1",
+                classifier.getModel1Type(),
+                "Model 2",
+                classifier.getModel2Type(),
+                "CPU threads",
+                TrainingThreads.total(),
+                "Images at once",
+                workersSpinner.getValue(),
                 // Only non-zero when the user has deliberately traded accuracy for speed, and it
                 // changes predictions — so a log that does not record it cannot be compared with
                 // another one.
                 "XGB max_bin",
-                        XGBoostModel.getMaxBin() == 0 ? "256 (default)" : String.valueOf(XGBoostModel.getMaxBin()));
+                XGBoostModel.getMaxBin() == 0 ? "256 (default)" : String.valueOf(XGBoostModel.getMaxBin()));
         final java.util.concurrent.atomic.AtomicReference<TrainingLogRecorder> logRecorderRef =
                 new java.util.concurrent.atomic.AtomicReference<>(TrainingLogRecorder.noOp());
 
@@ -836,6 +885,11 @@ public class ClassificationPanel extends VBox {
         final boolean poolAllImages = binaryActive || poolImagesCheckBox.isSelected();
         final ResamplingStrategy resamplingStrategy = getEffectiveResamplingStrategy();
         final boolean autoTuneSelected = autoTuneCheckBox.isSelected();
+        final int tuneTrials = tuneTrialsSpinner.getValue() == null
+                ? HyperparameterTuner.DEFAULT_TRIALS
+                : tuneTrialsSpinner.getValue();
+        final int tuneFolds =
+                tuneFoldsSpinner.getValue() == null ? HyperparameterTuner.DEFAULT_FOLDS : tuneFoldsSpinner.getValue();
         final boolean earlyStopSelected = earlyStopCheckBox.isSelected();
         final boolean computeMetricsSelected = computeMetricsCheckBox.isSelected();
         final List<String> finalFeatureNames = featureNames;
@@ -991,6 +1045,8 @@ public class ClassificationPanel extends VBox {
                                 supplementaryLabels,
                                 resamplingStrategy,
                                 autoTuneSelected,
+                                tuneTrials,
+                                tuneFolds,
                                 earlyStopSelected,
                                 computeMetricsSelected,
                                 trainLog);

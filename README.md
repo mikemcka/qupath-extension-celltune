@@ -92,7 +92,7 @@ See [CLAUDE.md](CLAUDE.md#build--test) for prerequisites (JDK 25), platform-spec
 ```bash
 export JAVA_HOME=/path/to/jdk-25
 ./gradlew shadowJar
-# → build/libs/qupath-extension-celltune-0.2.5-all.jar
+# → build/libs/qupath-extension-celltune-0.2.6-all.jar
 ```
 
 ## Project Structure

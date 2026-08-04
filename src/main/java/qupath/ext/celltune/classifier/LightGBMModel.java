@@ -99,7 +99,8 @@ public class LightGBMModel {
             int numRounds,
             int maxDepth,
             float learningRate,
-            float subsample)
+            float subsample,
+            float colsample)
             throws Exception {
 
         this.nClasses = classNames.size();
@@ -115,7 +116,7 @@ public class LightGBMModel {
         dataset.setField("label", labels);
 
         // Build parameter string
-        String params = buildParams(nClasses, maxDepth, learningRate, subsample);
+        String params = buildParams(nClasses, maxDepth, learningRate, subsample, colsample, TrainingThreads.total());
 
         // This build pins the CPU-only lightgbm4j artifact (see build.gradle.kts:
         // "io.github.metarank:lightgbm4j"). No GPU kernels are shipped, so device_type=gpu can
@@ -491,9 +492,28 @@ public class LightGBMModel {
 
     // ── Private helpers ─────────────────────────────────────────────────────────
 
+    /**
+     * Column-subsampling rate ({@code feature_fraction}) used unless a caller supplies one.
+     * Mirrors {@link XGBoostModel#DEFAULT_COLSAMPLE}: naming the former literal keeps every
+     * untuned path on the value it already used, so only a search result can move it.
+     */
+    static final float DEFAULT_COLSAMPLE = 0.8f;
+
     private static String buildParams(int nClasses, int maxDepth, float learningRate, float subsample) {
-        return buildParams(nClasses, maxDepth, learningRate, subsample, TrainingThreads.total());
+        return buildParams(nClasses, maxDepth, learningRate, subsample, DEFAULT_COLSAMPLE, TrainingThreads.total());
     }
+
+    /**
+     * Leaf cap applied to every LightGBM fit.
+     * <p>
+     * 31 is LightGBM's own default, stated explicitly because it — not {@code max_depth} — is the
+     * binding complexity constraint. LightGBM grows leaf-wise: {@code max_depth} only restricts
+     * anything while a depth-d tree's ceiling of 2^d leaves sits below this cap, so every depth
+     * from 5 upward yields the identical model. Naming it here lets
+     * {@link HyperparameterTuner#leafBoundedDepth(int)} bound the depth search instead of spending
+     * trials re-scoring one configuration, and keeps the two in step if the cap ever moves.
+     */
+    static final int NUM_LEAVES = 31;
 
     /**
      * The single definition of how a LightGBM booster in this extension is configured.
@@ -508,6 +528,16 @@ public class LightGBMModel {
      *                   concurrently-evaluated folds rather than letting each request every core
      */
     static String buildParams(int nClasses, int maxDepth, float learningRate, float subsample, int numThreads) {
+        return buildParams(nClasses, maxDepth, learningRate, subsample, DEFAULT_COLSAMPLE, numThreads);
+    }
+
+    /**
+     * @param colsample per-tree column-sampling rate ({@code feature_fraction}). A searched
+     *                  dimension — see {@link XGBoostModel#buildParams(int, int, float, float,
+     *                  float, int)} for why it earns a place in the search on a wide panel.
+     */
+    static String buildParams(
+            int nClasses, int maxDepth, float learningRate, float subsample, float colsample, int numThreads) {
         StringBuilder sb = new StringBuilder();
         if (nClasses == 2) {
             sb.append("objective=binary metric=binary_logloss");
@@ -515,10 +545,11 @@ public class LightGBMModel {
             sb.append("objective=multiclass metric=multi_logloss num_class=").append(nClasses);
         }
         sb.append(" max_depth=").append(maxDepth);
+        sb.append(" num_leaves=").append(NUM_LEAVES);
         sb.append(" learning_rate=").append(learningRate);
         sb.append(" bagging_fraction=").append(subsample);
         sb.append(" bagging_freq=1");
-        sb.append(" feature_fraction=0.8");
+        sb.append(" feature_fraction=").append(colsample);
         sb.append(" min_gain_to_split=10");
         sb.append(" num_threads=").append(numThreads);
         sb.append(" seed=42");
