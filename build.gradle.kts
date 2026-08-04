@@ -12,7 +12,7 @@ plugins {
 qupathExtension {
     name = "qupath-extension-celltune"
     group = "io.github.qupath"
-    version = "0.2.4"
+    version = "0.2.5"
     description = "CellTune-style active learning cell classifier for QuPath"
     automaticModule = "io.github.qupath.extension.celltune"
 }

@@ -1,8 +1,10 @@
 package qupath.ext.celltune.ui;
 
+import java.awt.image.BufferedImage;
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
@@ -40,6 +42,7 @@ import org.slf4j.LoggerFactory;
 import qupath.ext.celltune.model.IntensityHeatmap;
 import qupath.fx.dialogs.Dialogs;
 import qupath.lib.gui.QuPathGUI;
+import qupath.lib.images.ImageData;
 import qupath.lib.objects.PathObject;
 import qupath.lib.objects.PathObjectFilter;
 import qupath.lib.projects.Project;
@@ -58,7 +61,10 @@ import qupath.lib.projects.ProjectImageEntry;
  * <p>
  * Mirrors {@link ConfusionMatrixView}: canvas-based rendering, background
  * loading of other images via {@code readImageData()}, and a snapshot-based PNG
- * export.
+ * export. The open image is the one exception to that disk read — it is always
+ * pooled from its live hierarchy so the combined view cannot show classes the
+ * viewer has already replaced; see
+ * {@link IntensityHeatmap#selectImageSource(String, String, Object, java.util.function.Supplier)}.
  */
 public class IntensityHeatmapView {
 
@@ -217,18 +223,26 @@ public class IntensityHeatmapView {
             return;
         }
 
-        Project<?> project = qupath.getProject();
+        var project = qupath.getProject();
         if (project == null) {
             return;
         }
+
+        // Snapshot the live open image here, on the FX thread (this runs from the
+        // ComboBox action), so the background pooling below can read it instead of
+        // its .qpdata. Classifications applied to the open image live in memory
+        // until QuPath saves it, so reading it from disk would pool whatever the
+        // previous classifier wrote; see IntensityHeatmap#selectImageSource.
+        final ImageData<BufferedImage> openData = qupath.getImageData();
+        final String openName = openImageName(project, openData);
 
         summaryLabel.setText("Loading \u201c" + selected + "\u201d\u2026");
         new Thread(
                         () -> {
                             try {
                                 IntensityHeatmap.Result result = ALL_IMAGES_LABEL.equals(selected)
-                                        ? computeForAllImages(project)
-                                        : computeForImage(project, selected);
+                                        ? computeForAllImages(project, openData, openName)
+                                        : computeForImage(project, selected, openData, openName);
                                 if (result == null) {
                                     Platform.runLater(() ->
                                             summaryLabel.setText("No cells found for \u201c" + selected + "\u201d."));
@@ -250,12 +264,14 @@ public class IntensityHeatmapView {
                 .start();
     }
 
-    private IntensityHeatmap.Result computeForImage(Project<?> project, String imageName) throws IOException {
-        ProjectImageEntry<?> entry = findEntry(project, imageName);
+    private IntensityHeatmap.Result computeForImage(
+            Project<BufferedImage> project, String imageName, ImageData<BufferedImage> openData, String openName)
+            throws IOException {
+        ProjectImageEntry<BufferedImage> entry = findEntry(project, imageName);
         if (entry == null) {
             return null;
         }
-        var data = entry.readImageData();
+        var data = imageDataFor(entry, imageName, openData, openName);
         Collection<PathObject> cells = detections(data.getHierarchy());
         if (cells.isEmpty()) {
             return null;
@@ -265,7 +281,8 @@ public class IntensityHeatmapView {
         return acc.build();
     }
 
-    private IntensityHeatmap.Result computeForAllImages(Project<?> project) throws IOException {
+    private IntensityHeatmap.Result computeForAllImages(
+            Project<BufferedImage> project, ImageData<BufferedImage> openData, String openName) {
         var acc = new IntensityHeatmap.Accumulator(markerFeatures);
         boolean any = false;
         for (var entry : project.getImageList()) {
@@ -273,7 +290,7 @@ public class IntensityHeatmapView {
                 continue;
             }
             try {
-                var data = entry.readImageData();
+                var data = imageDataFor(entry, entry.getImageName(), openData, openName);
                 Collection<PathObject> cells = detections(data.getHierarchy());
                 if (!cells.isEmpty()) {
                     acc.add(cells);
@@ -286,7 +303,48 @@ public class IntensityHeatmapView {
         return any ? acc.build() : null;
     }
 
-    private static ProjectImageEntry<?> findEntry(Project<?> project, String imageName) {
+    /**
+     * Resolve one image's data via {@link IntensityHeatmap#selectImageSource}: the live
+     * open {@link ImageData} for the open image, its {@code .qpdata} for every other.
+     * The checked {@link IOException} from {@code readImageData} is tunnelled through
+     * the {@link java.util.function.Supplier} as an {@link UncheckedIOException} and
+     * unwrapped here, so callers keep the original checked signature.
+     */
+    private static ImageData<BufferedImage> imageDataFor(
+            ProjectImageEntry<BufferedImage> entry, String name, ImageData<BufferedImage> openData, String openName)
+            throws IOException {
+        try {
+            return IntensityHeatmap.selectImageSource(name, openName, openData, () -> {
+                try {
+                    return entry.readImageData();
+                } catch (IOException ex) {
+                    throw new UncheckedIOException(ex);
+                }
+            });
+        } catch (UncheckedIOException ex) {
+            throw ex.getCause();
+        }
+    }
+
+    /**
+     * Display name of the open image, or null when nothing is open. Falls back to the
+     * server metadata name for an image that is not a project entry, matching how
+     * {@code AnalysisViews} names the current image in the selector.
+     */
+    private static String openImageName(Project<BufferedImage> project, ImageData<BufferedImage> openData) {
+        if (openData == null) {
+            return null;
+        }
+        var entry = project.getEntry(openData);
+        if (entry != null
+                && entry.getImageName() != null
+                && !entry.getImageName().isBlank()) {
+            return entry.getImageName();
+        }
+        return openData.getServer().getMetadata().getName();
+    }
+
+    private static ProjectImageEntry<BufferedImage> findEntry(Project<BufferedImage> project, String imageName) {
         for (var entry : project.getImageList()) {
             if (entry != null && imageName.equals(entry.getImageName())) {
                 return entry;

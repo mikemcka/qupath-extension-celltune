@@ -6,6 +6,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 import qupath.lib.objects.PathObject;
 import qupath.lib.objects.classes.PathClass;
 
@@ -153,6 +154,41 @@ public final class IntensityHeatmap {
             }
         }
         return z;
+    }
+
+    /**
+     * Resolve where ONE image's cells are read from: the LIVE open image when
+     * {@code name} matches {@code openName} (disk is never touched in that case),
+     * or whatever {@code diskReader} supplies otherwise.
+     * <p>
+     * The project-combined heatmap pools every project image, and the open one must
+     * be pooled from its live hierarchy rather than re-read from its {@code .qpdata}.
+     * Classifications applied to the open image stay in memory until QuPath saves it
+     * — CellTune's training and composite-classification runs both write the other
+     * project images to disk but leave the open one to QuPath — so re-reading it
+     * would pool STALE classes. The visible symptom is a combined heatmap carrying
+     * phenotype rows from whichever classifier last wrote that file (e.g. leftover
+     * {@code Marker+}/{@code Marker-} rows from an earlier composite run) while the
+     * same image's own row set, built from the live hierarchy, shows the current
+     * classes.
+     * <p>
+     * Sibling of {@code CohortClusterModel.selectImageSource}, which applies the same
+     * rule to cohort pooling. This one is generic so the UI layer can pass an
+     * {@code ImageData<?>}, and it additionally treats a null {@code openData} as "no
+     * image open" so a name match can never resolve to a null source.
+     *
+     * @param name       the image being resolved
+     * @param openName   name of the open image (nullable — never matches if null)
+     * @param openData   the open image's live data (returned as-is when {@code name} matches)
+     * @param diskReader consulted ONLY when {@code name} does not match {@code openName}
+     * @param <T>        the image-data type
+     * @return the live open data, or the disk reader's result
+     */
+    public static <T> T selectImageSource(String name, String openName, T openData, Supplier<T> diskReader) {
+        if (openData != null && openName != null && openName.equals(name)) {
+            return openData;
+        }
+        return diskReader.get();
     }
 
     /**
