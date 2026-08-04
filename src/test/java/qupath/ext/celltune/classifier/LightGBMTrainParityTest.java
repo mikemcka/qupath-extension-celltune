@@ -135,7 +135,8 @@ class LightGBMTrainParityTest {
                 ROUNDS,
                 6,
                 0.05f,
-                0.8f);
+                0.8f,
+                LightGBMModel.DEFAULT_COLSAMPLE);
         float[][] currentProba = current.predictProba(testData, TEST_ROWS, N_FEATURES);
         current.close();
 
@@ -187,7 +188,8 @@ class LightGBMTrainParityTest {
                 10,
                 6,
                 0.05f,
-                0.8f);
+                0.8f,
+                LightGBMModel.DEFAULT_COLSAMPLE);
         float[][] fewProba = few.predictProba(testData, TEST_ROWS, N_FEATURES);
         few.close();
 
@@ -202,7 +204,8 @@ class LightGBMTrainParityTest {
                 200,
                 6,
                 0.05f,
-                0.8f);
+                0.8f,
+                LightGBMModel.DEFAULT_COLSAMPLE);
         float[][] manyProba = many.predictProba(testData, TEST_ROWS, N_FEATURES);
         many.close();
 

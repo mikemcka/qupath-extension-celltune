@@ -121,7 +121,8 @@ class XGBoostRoundSearchTest {
                 result.bestRounds(),
                 4,
                 0.2f,
-                0.8f);
+                0.8f,
+                XGBoostModel.DEFAULT_COLSAMPLE);
 
         float[][] fromSnapshot = restored.predictProba(f.valData(), VAL_ROWS, N_FEATURES);
         float[][] fromFresh = fresh.predictProba(f.valData(), VAL_ROWS, N_FEATURES);
@@ -194,7 +195,8 @@ class XGBoostRoundSearchTest {
                 12,
                 4,
                 0.2f,
-                0.8f);
+                0.8f,
+                XGBoostModel.DEFAULT_COLSAMPLE);
         return m.predictProba(f.valData(), VAL_ROWS, N_FEATURES);
     }
 

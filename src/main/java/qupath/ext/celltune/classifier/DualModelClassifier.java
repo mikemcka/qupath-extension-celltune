@@ -147,8 +147,38 @@ public class DualModelClassifier {
                 supplementaryLabels,
                 resampling,
                 autoTune,
+                HyperparameterTuner.DEFAULT_TRIALS,
+                HyperparameterTuner.DEFAULT_FOLDS,
                 earlyStop,
                 true,
+                log);
+    }
+
+    /** Retains the pre-configurable-search signature; tunes at the default trial and fold counts. */
+    public void trainAndPredict(
+            Collection<PathObject> allCells,
+            LabelStore labelStore,
+            CellFeatureExtractor extractor,
+            List<float[]> supplementaryRows,
+            List<String> supplementaryLabels,
+            ResamplingStrategy resampling,
+            boolean autoTune,
+            boolean earlyStop,
+            boolean computeMetrics,
+            Consumer<String> log)
+            throws Exception {
+        trainAndPredict(
+                allCells,
+                labelStore,
+                extractor,
+                supplementaryRows,
+                supplementaryLabels,
+                resampling,
+                autoTune,
+                HyperparameterTuner.DEFAULT_TRIALS,
+                HyperparameterTuner.DEFAULT_FOLDS,
+                earlyStop,
+                computeMetrics,
                 log);
     }
 
@@ -166,6 +196,8 @@ public class DualModelClassifier {
             List<String> supplementaryLabels,
             ResamplingStrategy resampling,
             boolean autoTune,
+            int tuneTrials,
+            int tuneFolds,
             boolean earlyStop,
             boolean computeMetrics,
             Consumer<String> log)
@@ -278,6 +310,9 @@ public class DualModelClassifier {
         int mdl1Depth = maxDepth, mdl2Depth = maxDepth;
         float mdl1Eta = eta, mdl2Eta = eta;
         float mdl1Sub = subsample, mdl2Sub = subsample;
+        // Not exposed in the panel: it has no default of its own to honour, so it sits at the
+        // models' shared DEFAULT_COLSAMPLE unless the search moves it.
+        float mdl1Col = XGBoostModel.DEFAULT_COLSAMPLE, mdl2Col = XGBoostModel.DEFAULT_COLSAMPLE;
 
         // Apply model-type-specific defaults
         if (model1Type == ModelType.LIGHTGBM) mdl1Eta = 0.05f;
@@ -362,7 +397,7 @@ public class DualModelClassifier {
                         keepBestModel,
                         out);
                 mdl1Rounds = search.bestRounds();
-                mdl1BestModel = BestModel.of(search.bestModel(), mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub);
+                mdl1BestModel = BestModel.of(search.bestModel(), mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub, mdl1Col);
             } else if (mdl1Boosted && model1Type == ModelType.LIGHTGBM) {
                 mdl1Rounds = LightGBMModel.findBestRounds(
                         esTrainData,
@@ -400,7 +435,7 @@ public class DualModelClassifier {
                         keepBestModel,
                         out);
                 mdl2Rounds = search.bestRounds();
-                mdl2BestModel = BestModel.of(search.bestModel(), mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub);
+                mdl2BestModel = BestModel.of(search.bestModel(), mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub, mdl2Col);
             } else if (mdl2Boosted && model2Type == ModelType.LIGHTGBM) {
                 mdl2Rounds = LightGBMModel.findBestRounds(
                         esTrainData,
@@ -420,29 +455,14 @@ public class DualModelClassifier {
             }
         }
 
-        // ── 1c. Resample full dataset if requested ──────────────────────────
-        // Keep references to the pre-resampling data so the train/val metrics
-        // step below can do an honest 80/20 split on real (non-synthetic) samples.
-        List<float[]> realTrainRows = trainRows;
-        List<Integer> realTrainLabels = trainLabels;
-        if (strategy != ResamplingStrategy.NONE) {
-            timer.start("resample (full)");
-            Resampler.Result resampled = Resampler.apply(trainRows, trainLabels, nClasses, strategy, out);
-            trainRows = resampled.rows();
-            trainLabels = resampled.labels();
-            nSamples = trainRows.size();
-        }
-
-        // Flatten to arrays
-        timer.start("flatten matrix");
-        float[] flatData = new float[nSamples * nFeatures];
-        float[] labelArray = new float[nSamples];
-        for (int i = 0; i < nSamples; i++) {
-            System.arraycopy(trainRows.get(i), 0, flatData, i * nFeatures, nFeatures);
-            labelArray[i] = trainLabels.get(i);
-        }
-
-        // ── 1d. Auto-tune hyperparameters if requested (boosted models only) ──
+        // ── 1c. Auto-tune hyperparameters if requested (boosted models only) ──
+        // Deliberately ahead of the full-dataset resample below. The tuner gets the REAL rows plus
+        // a per-fold resampler, so class balancing happens inside each fold's training portion and
+        // the rows it is scored on stay real. Balancing first and splitting afterwards put SMOTE's
+        // synthetic rows into the fold being scored with their interpolation parents in the fold
+        // being trained on — the search was reading back its own training data, and the settings
+        // that win a memorisation test are not the ones that generalise. Same rule as the
+        // early-stopping split above and the metrics split below.
         if (autoTune && (mdl1Boosted || mdl2Boosted)) {
             updateStatus("Auto-tuning hyperparameters…", earlyStop ? 0.10 : 0.05);
             out.accept("Auto-tuning hyperparameters…");
@@ -470,39 +490,104 @@ public class DualModelClassifier {
                 else if (model1Type == ModelType.LIGHTGBM) lgbRounds = mdl1Rounds;
             }
 
+            // The tuner's own matrix, built from the un-balanced rows. Kept local so it and the
+            // prepared folds are collectable before the full-dataset resample allocates again.
+            float[] tuneData = new float[nRealSamples * nFeatures];
+            float[] tuneLabels = new float[nRealSamples];
+            for (int i = 0; i < nRealSamples; i++) {
+                System.arraycopy(trainRows.get(i), 0, tuneData, i * nFeatures, nFeatures);
+                tuneLabels[i] = trainLabels.get(i);
+            }
+
+            final int foldFeatures = nFeatures;
+            final int foldClasses = nClasses;
+            final ResamplingStrategy foldStrategy = strategy;
+            HyperparameterTuner.FoldResampler foldResampler = foldStrategy == ResamplingStrategy.NONE
+                    ? null
+                    : (foldData, foldLabels, foldSize) -> {
+                        List<float[]> rows = new ArrayList<>(foldSize);
+                        List<Integer> rowLabels = new ArrayList<>(foldSize);
+                        for (int i = 0; i < foldSize; i++) {
+                            float[] row = new float[foldFeatures];
+                            System.arraycopy(foldData, i * foldFeatures, row, 0, foldFeatures);
+                            rows.add(row);
+                            rowLabels.add((int) foldLabels[i]);
+                        }
+                        // Silent: this runs once per fold and its per-class narration would bury
+                        // the trial lines the user is actually reading.
+                        Resampler.Result r = Resampler.apply(rows, rowLabels, foldClasses, foldStrategy, s -> {});
+                        int n = r.size();
+                        float[][] rowArray = r.rowArray();
+                        int[] labelArr = r.labelArray();
+                        float[] outData = new float[n * foldFeatures];
+                        float[] outLabels = new float[n];
+                        for (int i = 0; i < n; i++) {
+                            System.arraycopy(rowArray[i], 0, outData, i * foldFeatures, foldFeatures);
+                            outLabels[i] = labelArr[i];
+                        }
+                        return new HyperparameterTuner.Resampled(outData, outLabels, n);
+                    };
+
             var tuneResult = HyperparameterTuner.tune(
-                    flatData,
-                    labelArray,
-                    nSamples,
+                    tuneData,
+                    tuneLabels,
+                    nRealSamples,
                     nFeatures,
                     nClasses,
-                    HyperparameterTuner.DEFAULT_TRIALS,
-                    HyperparameterTuner.DEFAULT_FOLDS,
+                    tuneTrials,
+                    tuneFolds,
                     xgbRounds,
                     lgbRounds,
+                    foldResampler,
                     out);
             if (mdl1Boosted && model1Type == ModelType.XGBOOST) {
                 mdl1Rounds = tuneResult.xgbParams().numRounds();
                 mdl1Depth = tuneResult.xgbParams().maxDepth();
                 mdl1Eta = tuneResult.xgbParams().eta();
                 mdl1Sub = tuneResult.xgbParams().subsample();
+                mdl1Col = tuneResult.xgbParams().colsample();
             } else if (mdl1Boosted && model1Type == ModelType.LIGHTGBM) {
                 mdl1Rounds = tuneResult.lgbParams().numRounds();
                 mdl1Depth = tuneResult.lgbParams().maxDepth();
                 mdl1Eta = tuneResult.lgbParams().eta();
                 mdl1Sub = tuneResult.lgbParams().subsample();
+                mdl1Col = tuneResult.lgbParams().colsample();
             }
             if (mdl2Boosted && model2Type == ModelType.XGBOOST) {
                 mdl2Rounds = tuneResult.xgbParams().numRounds();
                 mdl2Depth = tuneResult.xgbParams().maxDepth();
                 mdl2Eta = tuneResult.xgbParams().eta();
                 mdl2Sub = tuneResult.xgbParams().subsample();
+                mdl2Col = tuneResult.xgbParams().colsample();
             } else if (mdl2Boosted && model2Type == ModelType.LIGHTGBM) {
                 mdl2Rounds = tuneResult.lgbParams().numRounds();
                 mdl2Depth = tuneResult.lgbParams().maxDepth();
                 mdl2Eta = tuneResult.lgbParams().eta();
                 mdl2Sub = tuneResult.lgbParams().subsample();
+                mdl2Col = tuneResult.lgbParams().colsample();
             }
+        }
+
+        // ── 1d. Resample full dataset if requested ──────────────────────────
+        // Keep references to the pre-resampling data so the train/val metrics
+        // step below can do an honest 80/20 split on real (non-synthetic) samples.
+        List<float[]> realTrainRows = trainRows;
+        List<Integer> realTrainLabels = trainLabels;
+        if (strategy != ResamplingStrategy.NONE) {
+            timer.start("resample (full)");
+            Resampler.Result resampled = Resampler.apply(trainRows, trainLabels, nClasses, strategy, out);
+            trainRows = resampled.rows();
+            trainLabels = resampled.labels();
+            nSamples = trainRows.size();
+        }
+
+        // Flatten to arrays
+        timer.start("flatten matrix");
+        float[] flatData = new float[nSamples * nFeatures];
+        float[] labelArray = new float[nSamples];
+        for (int i = 0; i < nSamples; i++) {
+            System.arraycopy(trainRows.get(i), 0, flatData, i * nFeatures, nFeatures);
+            labelArray[i] = trainLabels.get(i);
         }
 
         // ── 1e. Train/validation metrics (80/20 stratified split) ──────────
@@ -527,10 +612,12 @@ public class DualModelClassifier {
                         mdl1Depth,
                         mdl1Eta,
                         mdl1Sub,
+                        mdl1Col,
                         mdl2Rounds,
                         mdl2Depth,
                         mdl2Eta,
                         mdl2Sub,
+                        mdl2Col,
                         out,
                         sharedFold,
                         mdl1BestModel,
@@ -556,7 +643,17 @@ public class DualModelClassifier {
                 + (model1Type == ModelType.RANDOM_FOREST ? " trees" : " rounds") + ")…");
         timer.start("fit " + model1Type);
         trainModel(
-                model1Type, true, flatData, labelArray, nSamples, nFeatures, mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub);
+                model1Type,
+                true,
+                flatData,
+                labelArray,
+                nSamples,
+                nFeatures,
+                mdl1Rounds,
+                mdl1Depth,
+                mdl1Eta,
+                mdl1Sub,
+                mdl1Col);
         out.accept(model1Type + " trained on: " + getModelDevice(model1Type, true));
 
         // ── 3. Train Model 2 ───────────────────────────────────────────────
@@ -565,7 +662,17 @@ public class DualModelClassifier {
                 + (model2Type == ModelType.RANDOM_FOREST ? " trees" : " rounds") + ")…");
         timer.start("fit " + model2Type);
         trainModel(
-                model2Type, false, flatData, labelArray, nSamples, nFeatures, mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub);
+                model2Type,
+                false,
+                flatData,
+                labelArray,
+                nSamples,
+                nFeatures,
+                mdl2Rounds,
+                mdl2Depth,
+                mdl2Eta,
+                mdl2Sub,
+                mdl2Col);
         out.accept(model2Type + " trained on: " + getModelDevice(model2Type, false));
 
         // ── 4. Predict all cells (chunked for large datasets) ────────────
@@ -1034,18 +1141,22 @@ public class DualModelClassifier {
             int rounds,
             int depth,
             float lr,
-            float sub)
+            float sub,
+            float col)
             throws Exception {
         switch (type) {
             case XGBOOST -> {
                 if (xgbModel == null) xgbModel = new XGBoostModel();
-                xgbModel.train(flatData, labels, nSamples, nFeatures, classNames, featureNames, rounds, depth, lr, sub);
+                xgbModel.train(
+                        flatData, labels, nSamples, nFeatures, classNames, featureNames, rounds, depth, lr, sub, col);
             }
             case LIGHTGBM -> {
                 if (lgbModel == null) lgbModel = new LightGBMModel();
-                lgbModel.train(flatData, labels, nSamples, nFeatures, classNames, featureNames, rounds, depth, lr, sub);
+                lgbModel.train(
+                        flatData, labels, nSamples, nFeatures, classNames, featureNames, rounds, depth, lr, sub, col);
             }
             case RANDOM_FOREST -> {
+                // Random forests here are bagged over rows, not columns; col has no analogue.
                 var rf = new RandomForestModel();
                 rf.train(flatData, labels, nSamples, nFeatures, classNames, featureNames, rounds, depth, lr, sub);
                 if (isModel1) rfModel1 = rf;
@@ -1146,16 +1257,21 @@ public class DualModelClassifier {
      * without this check the metrics report would describe the pre-tune model while the deployed
      * one used the tuned settings.
      */
-    private record BestModel(byte[] bytes, int rounds, int depth, float eta, float subsample) {
+    private record BestModel(byte[] bytes, int rounds, int depth, float eta, float subsample, float colsample) {
 
         /** @return a snapshot, or {@code null} when the search did not keep one */
-        static BestModel of(byte[] bytes, int rounds, int depth, float eta, float subsample) {
-            return bytes == null ? null : new BestModel(bytes, rounds, depth, eta, subsample);
+        static BestModel of(byte[] bytes, int rounds, int depth, float eta, float subsample, float colsample) {
+            return bytes == null ? null : new BestModel(bytes, rounds, depth, eta, subsample, colsample);
         }
 
-        /** @return true if this model is the one a fit with these settings would have produced */
-        boolean matches(int r, int d, float e, float s) {
-            return rounds == r && depth == d && eta == e && subsample == s;
+        /**
+         * @return true if this model is the one a fit with these settings would have produced.
+         *         Every model-affecting parameter has to be in this comparison: the snapshot is
+         *         taken during early stopping, before auto-tune runs, so a search that moves any
+         *         one of them makes the cached bytes the wrong model to restore.
+         */
+        boolean matches(int r, int d, float e, float s, float c) {
+            return rounds == r && depth == d && eta == e && subsample == s && colsample == c;
         }
     }
 
@@ -1170,10 +1286,12 @@ public class DualModelClassifier {
             int mdl1Depth,
             float mdl1Eta,
             float mdl1Sub,
+            float mdl1Col,
             int mdl2Rounds,
             int mdl2Depth,
             float mdl2Eta,
             float mdl2Sub,
+            float mdl2Col,
             Consumer<String> out,
             TrainValMetricsComputer.PreparedFold cachedFold,
             BestModel mdl1BestModel,
@@ -1196,11 +1314,21 @@ public class DualModelClassifier {
                     if (mdl1BestModel != null
                             && model1Type == ModelType.XGBOOST
                             && data == foldData
-                            && mdl1BestModel.matches(mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub)) {
+                            && mdl1BestModel.matches(mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub, mdl1Col)) {
                         getOrCreateXgb().loadFromBytes(mdl1BestModel.bytes(), classNames, featureNames);
                     } else {
                         trainModel(
-                                model1Type, true, data, labels, n, nFeatures, mdl1Rounds, mdl1Depth, mdl1Eta, mdl1Sub);
+                                model1Type,
+                                true,
+                                data,
+                                labels,
+                                n,
+                                nFeatures,
+                                mdl1Rounds,
+                                mdl1Depth,
+                                mdl1Eta,
+                                mdl1Sub,
+                                mdl1Col);
                     }
                 },
                 (data, n) -> predictModel(model1Type, true, data, n, nFeatures),
@@ -1209,11 +1337,21 @@ public class DualModelClassifier {
                     if (mdl2BestModel != null
                             && model2Type == ModelType.XGBOOST
                             && data == foldData
-                            && mdl2BestModel.matches(mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub)) {
+                            && mdl2BestModel.matches(mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub, mdl2Col)) {
                         getOrCreateXgb().loadFromBytes(mdl2BestModel.bytes(), classNames, featureNames);
                     } else {
                         trainModel(
-                                model2Type, false, data, labels, n, nFeatures, mdl2Rounds, mdl2Depth, mdl2Eta, mdl2Sub);
+                                model2Type,
+                                false,
+                                data,
+                                labels,
+                                n,
+                                nFeatures,
+                                mdl2Rounds,
+                                mdl2Depth,
+                                mdl2Eta,
+                                mdl2Sub,
+                                mdl2Col);
                     }
                 },
                 (data, n) -> predictModel(model2Type, false, data, n, nFeatures),

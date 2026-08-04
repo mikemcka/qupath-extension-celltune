@@ -45,6 +45,7 @@ public class XGBoostModel {
      * @param maxDepth     max tree depth
      * @param eta          learning rate
      * @param subsample    row subsampling ratio per round
+     * @param colsample    column subsampling ratio per tree ({@link #DEFAULT_COLSAMPLE} when untuned)
      * @throws XGBoostError if training fails
      */
     public void train(
@@ -57,7 +58,8 @@ public class XGBoostModel {
             int numRounds,
             int maxDepth,
             float eta,
-            float subsample)
+            float subsample,
+            float colsample)
             throws XGBoostError {
 
         this.nClasses = classNames.size();
@@ -68,7 +70,8 @@ public class XGBoostModel {
         try {
             trainMat.setLabel(labels);
 
-            Map<String, Object> params = buildParams(nClasses, maxDepth, eta, subsample);
+            Map<String, Object> params =
+                    buildParams(nClasses, maxDepth, eta, subsample, colsample, TrainingThreads.total());
             // No watches: XGBoost evaluates every watched matrix once per round, and a "train"
             // watch here scored the full training matrix on all N rounds with nothing consuming
             // the result (no callback is passed, and evaluation never feeds back into boosting).
@@ -463,8 +466,18 @@ public class XGBoostModel {
         return sb.toString();
     }
 
+    /**
+     * Column-subsampling rate used unless a caller supplies one.
+     * <p>
+     * This was a bare literal until {@code colsample_bytree} became a tuned dimension. Naming it
+     * keeps every untuned path — the early-stopping round search, the metrics copies, a run with
+     * auto-tune switched off — on exactly the value they used before, so only a deliberate search
+     * result can move it.
+     */
+    static final float DEFAULT_COLSAMPLE = 0.8f;
+
     private static Map<String, Object> buildParams(int nClasses, int maxDepth, float eta, float subsample) {
-        return buildParams(nClasses, maxDepth, eta, subsample, TrainingThreads.total());
+        return buildParams(nClasses, maxDepth, eta, subsample, DEFAULT_COLSAMPLE, TrainingThreads.total());
     }
 
     /**
@@ -481,12 +494,23 @@ public class XGBoostModel {
      *                 concurrently-evaluated folds rather than letting each request every core
      */
     static Map<String, Object> buildParams(int nClasses, int maxDepth, float eta, float subsample, int nThreads) {
+        return buildParams(nClasses, maxDepth, eta, subsample, DEFAULT_COLSAMPLE, nThreads);
+    }
+
+    /**
+     * @param colsample per-tree column-sampling rate. A searched dimension: on a wide panel the
+     *                  fraction of features each tree may look at moves accuracy at least as much
+     *                  as tree depth does, so the tuner varies it and every untuned path passes
+     *                  {@link #DEFAULT_COLSAMPLE}.
+     */
+    static Map<String, Object> buildParams(
+            int nClasses, int maxDepth, float eta, float subsample, float colsample, int nThreads) {
 
         Map<String, Object> p = new LinkedHashMap<>();
         p.put("max_depth", maxDepth);
         p.put("eta", (double) eta);
         p.put("subsample", (double) subsample);
-        p.put("colsample_bytree", 0.8);
+        p.put("colsample_bytree", (double) colsample);
         p.put("objective", nClasses == 2 ? "binary:logistic" : "multi:softprob");
         p.put("eval_metric", nClasses == 2 ? "logloss" : "mlogloss");
         p.put("nthread", nThreads);

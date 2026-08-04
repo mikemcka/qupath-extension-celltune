@@ -41,32 +41,91 @@ public final class HyperparameterTuner {
     /** Minimum training samples required for tuning. */
     private static final int MIN_SAMPLES = 20;
 
+    /** Fewest folds a cross-validation can be reduced to and still be one. */
+    private static final int MIN_FOLDS = 2;
+
     // ── Search space bounds ─────────────────────────────────────────────────
     static final int ROUNDS_MIN = 50, ROUNDS_MAX = 500;
     static final int DEPTH_MIN = 2, DEPTH_MAX = 12;
     static final double ETA_MIN = 0.01, ETA_MAX = 0.3;
     static final double SUB_MIN = 0.5, SUB_MAX = 1.0;
+    // Column sampling. Bottoms out well below the row-sampling floor because the panels this runs
+    // on are wide and highly correlated — at ~1,900 features, showing each tree a third of them is
+    // a reasonable candidate, where sampling a third of the *rows* would not be.
+    static final double COL_MIN = 0.3, COL_MAX = 1.0;
 
     // Transformed space bounds (log for eta)
-    private static final double[] LOWER = {ROUNDS_MIN, DEPTH_MIN, Math.log(ETA_MIN), SUB_MIN};
-    private static final double[] UPPER = {ROUNDS_MAX, DEPTH_MAX, Math.log(ETA_MAX), SUB_MAX};
+    private static final double[] LOWER = {ROUNDS_MIN, DEPTH_MIN, Math.log(ETA_MIN), SUB_MIN, COL_MIN};
+    private static final double[] UPPER = {ROUNDS_MAX, DEPTH_MAX, Math.log(ETA_MAX), SUB_MAX, COL_MAX};
 
     private HyperparameterTuner() {} // utility class
 
     // ── Result types ────────────────────────────────────────────────────────
 
     /** A set of hyperparameters for boosted tree models. */
-    public record HyperParams(int numRounds, int maxDepth, float eta, float subsample) {
+    public record HyperParams(int numRounds, int maxDepth, float eta, float subsample, float colsample) {
         @Override
         public String toString() {
-            return String.format("rounds=%d, depth=%d, eta=%.4f, subsample=%.2f", numRounds, maxDepth, eta, subsample);
+            return String.format(
+                    "rounds=%d, depth=%d, eta=%.4f, subsample=%.2f, colsample=%.2f",
+                    numRounds, maxDepth, eta, subsample, colsample);
         }
+    }
+
+    /** The parameters a run uses when the search is skipped or produces nothing usable. */
+    static HyperParams defaults() {
+        return new HyperParams(200, 6, 0.1f, 0.8f, XGBoostModel.DEFAULT_COLSAMPLE);
     }
 
     /** Result of a tuning run: best parameters for each model and their CV scores. */
     public record TuningResult(HyperParams xgbParams, double xgbScore, HyperParams lgbParams, double lgbScore) {}
 
     private record ModelTuneResult(HyperParams params, double score) {}
+
+    /**
+     * A resampled fold-training set: row-major rows, one label per row, and the row count.
+     * <p>
+     * Package-private, like {@link FoldResampler}: both are handed straight between
+     * {@code DualModelClassifier} and this class and never escape the package. Publishing a record
+     * that wraps caller-owned arrays would mean either defensive copies of a matrix sized in
+     * hundreds of MB, or a documented aliasing contract — neither worth it for a two-class seam.
+     */
+    record Resampled(float[] data, float[] labels, int size) {}
+
+    /**
+     * Class-balances ONE fold's training rows. Applied during fold preparation, never to the whole
+     * dataset before splitting.
+     * <p>
+     * The distinction is not cosmetic. SMOTE builds each synthetic row by interpolating between two
+     * real rows of the same class, so a synthetic row generated <em>before</em> the split can land
+     * in the fold being scored while both of its parents sit in the fold being trained on — the
+     * model is then graded on points it can reconstruct from what it memorised. The inflation is
+     * worst exactly where macro-F1 is most sensitive (a rare class padded from tens of real rows to
+     * thousands of synthetic ones still counts once in the average), and it is not uniform across
+     * the search space: it rewards whichever settings fit the minority neighbourhoods tightest,
+     * which is the very axis being searched. So it does not merely flatter the score, it picks the
+     * wrong winner.
+     * <p>
+     * Same rule the early-stopping split and the train/val metrics split in
+     * {@code DualModelClassifier} already follow: score against real rows only.
+     */
+    @FunctionalInterface
+    interface FoldResampler {
+        /**
+         * @param trainData  row-major training rows for one fold
+         * @param trainLabels one label per row
+         * @param trainSize  number of rows
+         * @return the balanced training set for that fold
+         */
+        Resampled resample(float[] trainData, float[] trainLabels, int trainSize);
+    }
+
+    /**
+     * One materialised CV fold: the rows to train on (already balanced, if a {@link FoldResampler}
+     * was supplied) and the untouched real rows to score against.
+     */
+    private record PreparedFold(
+            float[] trainData, float[] trainLabels, int trainSize, float[] testData, int[] testTruth, int testSize) {}
 
     // ── Main API ────────────────────────────────────────────────────────────
 
@@ -93,7 +152,7 @@ public final class HyperparameterTuner {
             int nTrials,
             int nFolds,
             Consumer<String> log) {
-        return tune(flatData, labels, nSamples, nFeatures, nClasses, nTrials, nFolds, null, null, log);
+        return tune(flatData, labels, nSamples, nFeatures, nClasses, nTrials, nFolds, null, null, null, log);
     }
 
     /**
@@ -115,13 +174,59 @@ public final class HyperparameterTuner {
             Integer xgbFixedRounds,
             Integer lgbFixedRounds,
             Consumer<String> log) {
+        return tune(
+                flatData,
+                labels,
+                nSamples,
+                nFeatures,
+                nClasses,
+                nTrials,
+                nFolds,
+                xgbFixedRounds,
+                lgbFixedRounds,
+                null,
+                log);
+    }
+
+    /**
+     * @param resampler class balancing to apply inside each fold's training rows, or {@code null}
+     *                  for none. Pass the real (un-balanced) rows as {@code flatData} together with
+     *                  this: balancing the whole dataset first and splitting afterwards leaks
+     *                  synthetic rows into the fold being scored — see {@link FoldResampler}.
+     */
+    static TuningResult tune(
+            float[] flatData,
+            float[] labels,
+            int nSamples,
+            int nFeatures,
+            int nClasses,
+            int nTrials,
+            int nFolds,
+            Integer xgbFixedRounds,
+            Integer lgbFixedRounds,
+            FoldResampler resampler,
+            Consumer<String> log) {
         Consumer<String> out = log != null ? log : s -> {};
 
         if (nSamples < MIN_SAMPLES) {
             out.accept("Too few samples (" + nSamples + ") for auto-tuning — using defaults");
-            HyperParams defaults = new HyperParams(200, 6, 0.1f, 0.8f);
+            HyperParams defaults = defaults();
             return new TuningResult(defaults, 0, defaults, 0);
         }
+
+        int[] intLabels = new int[nSamples];
+        for (int i = 0; i < nSamples; i++) intLabels[i] = (int) labels[i];
+
+        // A k-fold split can only give every class a presence in every training fold if the rarest
+        // class has at least k members. Above that, k folds means each class sits out of one fold's
+        // training set at a time; below it, some fold trains without the class entirely and then
+        // scores rows of it, taking a guaranteed zero on that class's F1. That zero is identical
+        // for every trial, so it does not corrupt the ranking TPE works from — but it drags the
+        // reported score down for a reason that has nothing to do with hyperparameters, and a
+        // reader comparing it against the Training Metrics report has no way to know that. Clamp
+        // to what the data supports and say so, rather than reporting a confident number from
+        // folds too thin to carry one.
+        int effectiveFolds = resolveFolds(intLabels, nClasses, nFolds, out);
 
         // Say what this is actually going to do. "Several minutes" was the old wording, and at a
         // wide panel with many classes a single fit runs into minutes on its own — 2 x trials x
@@ -129,49 +234,41 @@ public final class HyperparameterTuner {
         out.accept(String.format(
                 "Auto-tuning: %d TPE trials × %d folds per model on %,d samples × %,d features"
                         + " — %d model fits in total",
-                nTrials, nFolds, nSamples, nFeatures, 2 * nTrials * nFolds));
+                nTrials, effectiveFolds, nSamples, nFeatures, 2 * nTrials * effectiveFolds));
         if (xgbFixedRounds != null || lgbFixedRounds != null) {
             out.accept(String.format(
                     "  Holding rounds at the early-stopping result (XGBoost %s, LightGBM %s);"
-                            + " searching depth, learning rate and subsample",
+                            + " searching depth, learning rate, subsample and colsample",
                     xgbFixedRounds == null ? "searched" : xgbFixedRounds,
                     lgbFixedRounds == null ? "searched" : lgbFixedRounds));
         }
 
-        int[] intLabels = new int[nSamples];
-        for (int i = 0; i < nSamples; i++) intLabels[i] = (int) labels[i];
+        List<int[][]> foldIndices = stratifiedKFold(intLabels, nClasses, effectiveFolds, new Random(42));
 
-        List<int[][]> folds = stratifiedKFold(intLabels, nClasses, nFolds, new Random(42));
+        // Materialised once and shared by both models. The folds are identical on every trial, so
+        // re-deriving them per trial re-ran the row copies 2 x nTrials times over — and now that
+        // balancing happens per fold, it would re-run SMOTE just as often, which used to be the
+        // single most expensive phase of a training run. The trade is that all folds stay resident
+        // for the whole search rather than being rebuilt and dropped per trial; the footprint is
+        // logged below so a run that runs out of memory says why.
+        List<PreparedFold> folds = prepareFolds(flatData, labels, intLabels, nFeatures, foldIndices, resampler, out);
 
         // Tune each model independently
         out.accept("── Tuning XGBoost ──");
         ModelTuneResult xgb = tuneModel(
-                "XGBoost",
-                flatData,
-                labels,
-                intLabels,
-                nSamples,
-                nFeatures,
-                nClasses,
-                folds,
-                nTrials,
-                new Random(42),
-                xgbFixedRounds,
-                out);
+                "XGBoost", folds, nFeatures, nClasses, nTrials, new Random(42), xgbFixedRounds, DEPTH_MAX, out);
 
+        // LightGBM's depth ceiling is lower than XGBoost's because its leaf cap binds first.
         out.accept("── Tuning LightGBM ──");
         ModelTuneResult lgb = tuneModel(
                 "LightGBM",
-                flatData,
-                labels,
-                intLabels,
-                nSamples,
+                folds,
                 nFeatures,
                 nClasses,
-                folds,
                 nTrials,
                 new Random(43),
                 lgbFixedRounds,
+                leafBoundedDepth(LightGBMModel.NUM_LEAVES),
                 out);
 
         out.accept(String.format("Best XGBoost:  %s → F1 = %.4f", xgb.params(), xgb.score()));
@@ -180,22 +277,154 @@ public final class HyperparameterTuner {
         return new TuningResult(xgb.params(), xgb.score(), lgb.params(), lgb.score());
     }
 
+    // ── Fold count ──────────────────────────────────────────────────────────
+
+    /**
+     * Reduce the requested fold count to what the rarest class can support, warning when it does.
+     * <p>
+     * Mirrors the warning scikit-learn's {@code StratifiedKFold} emits — "the least populated class
+     * has n members, which is less than n_splits" — except that this clamps as well as warns, since
+     * nothing downstream can act on the warning. Classes with no labelled rows at all are ignored:
+     * a class the user has declared but not yet labelled says nothing about how finely the labelled
+     * data can be split.
+     *
+     * @return the fold count to actually use, never below {@link #MIN_FOLDS}
+     */
+    static int resolveFolds(int[] intLabels, int nClasses, int requestedFolds, Consumer<String> out) {
+        int[] support = new int[nClasses];
+        for (int label : intLabels) {
+            if (label >= 0 && label < nClasses) support[label]++;
+        }
+
+        int rarest = Integer.MAX_VALUE;
+        int rarestClass = -1;
+        for (int c = 0; c < nClasses; c++) {
+            if (support[c] > 0 && support[c] < rarest) {
+                rarest = support[c];
+                rarestClass = c;
+            }
+        }
+        if (rarestClass < 0) {
+            return requestedFolds; // no labelled rows at all; MIN_SAMPLES already gates this
+        }
+
+        if (rarest >= requestedFolds) {
+            return requestedFolds;
+        }
+
+        int folds = Math.max(MIN_FOLDS, rarest);
+        if (rarest < MIN_FOLDS) {
+            // Even two folds cannot train and score a single-member class. Nothing to clamp to, so
+            // the honest move is to say the class is unscoreable and carry on with the rest.
+            out.accept(String.format(
+                    "  Note: class %d has only %d labelled row(s), too few for cross-validation to"
+                            + " score it at all — its F1 counts as 0 in every trial. Label a few more"
+                            + " for the search to see it.",
+                    rarestClass, rarest));
+        } else {
+            out.accept(String.format(
+                    "  Note: the least populated class (%d) has %d labelled rows, fewer than the %d"
+                            + " folds requested — using %d folds so every fold can train on it.",
+                    rarestClass, rarest, requestedFolds, folds));
+        }
+        return folds;
+    }
+
+    // ── Fold preparation ────────────────────────────────────────────────────
+
+    /**
+     * Cut every fold out of the dataset once, balancing each fold's training rows in isolation.
+     *
+     * @param resampler applied to the training rows only; the scored rows are always the real ones
+     */
+    private static List<PreparedFold> prepareFolds(
+            float[] flatData,
+            float[] labels,
+            int[] intLabels,
+            int nFeatures,
+            List<int[][]> foldIndices,
+            FoldResampler resampler,
+            Consumer<String> out) {
+
+        List<PreparedFold> prepared = new ArrayList<>(foldIndices.size());
+        long realTrainRows = 0;
+        long trainRows = 0;
+        long testRows = 0;
+
+        for (var fold : foldIndices) {
+            int[] trainIdx = fold[0];
+            int[] testIdx = fold[1];
+
+            float[] trainData = extractRows(flatData, trainIdx, nFeatures);
+            float[] trainLabels = extractLabels(labels, trainIdx);
+            int trainSize = trainIdx.length;
+            realTrainRows += trainSize;
+
+            if (resampler != null) {
+                Resampled balanced = resampler.resample(trainData, trainLabels, trainSize);
+                trainData = balanced.data();
+                trainLabels = balanced.labels();
+                trainSize = balanced.size();
+            }
+
+            trainRows += trainSize;
+            testRows += testIdx.length;
+            prepared.add(new PreparedFold(
+                    trainData,
+                    trainLabels,
+                    trainSize,
+                    extractRows(flatData, testIdx, nFeatures),
+                    extractIntLabels(intLabels, testIdx),
+                    testIdx.length));
+        }
+
+        long mb = (trainRows + testRows) * nFeatures * (long) Float.BYTES / (1024 * 1024);
+        if (resampler != null) {
+            out.accept(String.format(
+                    "  Folds prepared once and reused: %,d training rows balanced to %,d inside the folds,"
+                            + " scored against %,d real rows (~%,d MB held)",
+                    realTrainRows, trainRows, testRows, mb));
+        } else {
+            out.accept(String.format(
+                    "  Folds prepared once and reused: %,d training rows, %,d scored rows (~%,d MB held)",
+                    trainRows, testRows, mb));
+        }
+        return prepared;
+    }
+
+    /**
+     * Highest {@code max_depth} worth searching for a leaf-capped learner.
+     * <p>
+     * LightGBM grows leaf-wise under a {@code num_leaves} cap, so {@code max_depth} constrains the
+     * tree only while a depth-d tree's ceiling of 2^d leaves stays below that cap. At the default
+     * 31 leaves every depth from 5 up produces the same model, and searching 5..12 spends trials
+     * re-scoring one configuration. Derived from the cap rather than hard-coded so the two cannot
+     * drift apart.
+     *
+     * @param numLeaves the leaf cap the model is configured with
+     * @return the smallest depth whose leaf ceiling reaches the cap, clamped to {@link #DEPTH_MAX}
+     */
+    static int leafBoundedDepth(int numLeaves) {
+        int depth = DEPTH_MIN;
+        while (depth < DEPTH_MAX && (1L << depth) < numLeaves) {
+            depth++;
+        }
+        return depth;
+    }
+
     // ── Per-model TPE tuning loop ───────────────────────────────────────────
 
     private static ModelTuneResult tuneModel(
             String modelName,
-            float[] flatData,
-            float[] labels,
-            int[] intLabels,
-            int nSamples,
+            List<PreparedFold> folds,
             int nFeatures,
             int nClasses,
-            List<int[][]> folds,
             int nTrials,
             Random rng,
             Integer fixedRounds,
+            int depthMax,
             Consumer<String> log) {
-        TPESampler sampler = new TPESampler(rng, fixedRounds);
+        TPESampler sampler = new TPESampler(rng, fixedRounds, depthMax);
         HyperParams bestParams = null;
         double bestScore = -1;
         boolean anyTrialScored = false;
@@ -229,38 +458,9 @@ public final class HyperparameterTuner {
                 if (parallelFolds) {
                     // Submit all folds in parallel
                     List<Future<Double>> futures = new ArrayList<>(nFolds);
-                    for (var fold : folds) {
-                        int[] trainIdx = fold[0];
-                        int[] testIdx = fold[1];
-
-                        float[] foldTrainData = extractRows(flatData, trainIdx, nFeatures);
-                        float[] foldTrainLabels = extractLabels(labels, trainIdx);
-                        float[] foldTestData = extractRows(flatData, testIdx, nFeatures);
-                        int[] foldTestTruth = extractIntLabels(intLabels, testIdx);
-
-                        futures.add(foldPool.submit(() -> "XGBoost".equals(modelName)
-                                ? evaluateXGBoostFold(
-                                        foldTrainData,
-                                        foldTrainLabels,
-                                        trainIdx.length,
-                                        foldTestData,
-                                        foldTestTruth,
-                                        testIdx.length,
-                                        nFeatures,
-                                        nClasses,
-                                        hp,
-                                        threadsPerFold)
-                                : evaluateLightGBMFold(
-                                        foldTrainData,
-                                        foldTrainLabels,
-                                        trainIdx.length,
-                                        foldTestData,
-                                        foldTestTruth,
-                                        testIdx.length,
-                                        nFeatures,
-                                        nClasses,
-                                        hp,
-                                        threadsPerFold)));
+                    for (PreparedFold fold : folds) {
+                        futures.add(foldPool.submit(
+                                () -> evaluateFold(modelName, fold, nFeatures, nClasses, hp, threadsPerFold)));
                     }
 
                     for (Future<Double> f : futures) {
@@ -276,39 +476,8 @@ public final class HyperparameterTuner {
                     }
                 } else {
                     // Sequential fallback
-                    for (var fold : folds) {
-                        int[] trainIdx = fold[0];
-                        int[] testIdx = fold[1];
-
-                        float[] foldTrainData = extractRows(flatData, trainIdx, nFeatures);
-                        float[] foldTrainLabels = extractLabels(labels, trainIdx);
-                        float[] foldTestData = extractRows(flatData, testIdx, nFeatures);
-                        int[] foldTestTruth = extractIntLabels(intLabels, testIdx);
-
-                        double f1 = "XGBoost".equals(modelName)
-                                ? evaluateXGBoostFold(
-                                        foldTrainData,
-                                        foldTrainLabels,
-                                        trainIdx.length,
-                                        foldTestData,
-                                        foldTestTruth,
-                                        testIdx.length,
-                                        nFeatures,
-                                        nClasses,
-                                        hp,
-                                        threadsPerFold)
-                                : evaluateLightGBMFold(
-                                        foldTrainData,
-                                        foldTrainLabels,
-                                        trainIdx.length,
-                                        foldTestData,
-                                        foldTestTruth,
-                                        testIdx.length,
-                                        nFeatures,
-                                        nClasses,
-                                        hp,
-                                        threadsPerFold);
-
+                    for (PreparedFold fold : folds) {
+                        double f1 = evaluateFold(modelName, fold, nFeatures, nClasses, hp, threadsPerFold);
                         if (f1 >= 0) {
                             totalScore += f1;
                             validFolds++;
@@ -351,7 +520,7 @@ public final class HyperparameterTuner {
         if (!anyTrialScored || bestParams == null) {
             // Every trial failed, so the search learned nothing. Returning the first random draw
             // would look like a tuned result; the documented defaults are the honest answer.
-            bestParams = new HyperParams(200, 6, 0.1f, 0.8f);
+            bestParams = defaults();
             bestScore = -1;
             log.accept("  No trial produced a usable score — falling back to defaults: " + bestParams);
         }
@@ -376,10 +545,13 @@ public final class HyperparameterTuner {
         private static final double GAMMA = 0.25; // top 25% = "good"
         private static final int N_CANDIDATES = 24;
         private static final int WARM_UP = 5;
-        private static final int N_DIMS = 4;
+        private static final int N_DIMS = 5;
 
         /** Index of the rounds dimension in the transformed vector. */
         private static final int DIM_ROUNDS = 0;
+
+        /** Index of the depth dimension in the transformed vector. */
+        private static final int DIM_DEPTH = 1;
 
         private final Random rng;
         private final List<double[]> history = new ArrayList<>();
@@ -397,13 +569,25 @@ public final class HyperparameterTuner {
         /** The dimensions actually being searched — all four, or the three besides rounds. */
         private final int[] dims;
 
-        TPESampler(Random rng, Integer fixedRounds) {
+        /**
+         * Per-model bounds. Only the depth ceiling varies: a leaf-capped learner stops responding
+         * to depth well before {@link #DEPTH_MAX}, so its search space is narrowed to the range
+         * that changes the model rather than being padded with equivalent configurations.
+         */
+        private final double[] lower;
+
+        private final double[] upper;
+
+        TPESampler(Random rng, Integer fixedRounds, int depthMax) {
             this.rng = rng;
             this.fixedRounds = fixedRounds;
+            this.lower = LOWER;
+            this.upper = UPPER.clone();
+            this.upper[DIM_DEPTH] = depthMax;
             if (fixedRounds == null) {
-                this.dims = new int[] {0, 1, 2, 3};
+                this.dims = new int[] {0, 1, 2, 3, 4};
             } else {
-                this.dims = new int[] {1, 2, 3};
+                this.dims = new int[] {1, 2, 3, 4};
             }
         }
 
@@ -462,7 +646,7 @@ public final class HyperparameterTuner {
                 double[] center = points.get(rng.nextInt(points.size()));
                 double bw = silvermanBW(points, d);
                 sample[d] = center[d] + rng.nextGaussian() * bw;
-                sample[d] = Math.max(LOWER[d], Math.min(UPPER[d], sample[d]));
+                sample[d] = Math.max(lower[d], Math.min(upper[d], sample[d]));
             }
             return sample;
         }
@@ -486,7 +670,7 @@ public final class HyperparameterTuner {
         /** Silverman's rule of thumb bandwidth: h = 1.06 σ n^{-1/5}. */
         private double silvermanBW(List<double[]> points, int dim) {
             int n = points.size();
-            if (n < 2) return (UPPER[dim] - LOWER[dim]) / 4.0;
+            if (n < 2) return (upper[dim] - lower[dim]) / 4.0;
 
             double mean = 0;
             for (double[] p : points) mean += p[dim];
@@ -499,7 +683,7 @@ public final class HyperparameterTuner {
             }
             variance /= (n - 1);
             double std = Math.sqrt(variance);
-            if (std < 1e-10) std = (UPPER[dim] - LOWER[dim]) / 4.0;
+            if (std < 1e-10) std = (upper[dim] - lower[dim]) / 4.0;
 
             return 1.06 * std * Math.pow(n, -0.2);
         }
@@ -512,15 +696,16 @@ public final class HyperparameterTuner {
                 rounds = ROUNDS_MIN + rng.nextInt(ROUNDS_MAX - ROUNDS_MIN + 1);
                 rounds = ((rounds + 5) / 10) * 10;
             }
-            int depth = DEPTH_MIN + rng.nextInt(DEPTH_MAX - DEPTH_MIN + 1);
+            int depth = DEPTH_MIN + rng.nextInt((int) upper[DIM_DEPTH] - DEPTH_MIN + 1);
             float eta =
                     (float) Math.exp(Math.log(ETA_MIN) + rng.nextDouble() * (Math.log(ETA_MAX) - Math.log(ETA_MIN)));
             float sub = (float) (SUB_MIN + rng.nextDouble() * (SUB_MAX - SUB_MIN));
-            return new HyperParams(rounds, depth, eta, sub);
+            float col = (float) (COL_MIN + rng.nextDouble() * (COL_MAX - COL_MIN));
+            return new HyperParams(rounds, depth, eta, sub, col);
         }
 
         private static double[] toTransformed(HyperParams hp) {
-            return new double[] {hp.numRounds(), hp.maxDepth(), Math.log(hp.eta()), hp.subsample()};
+            return new double[] {hp.numRounds(), hp.maxDepth(), Math.log(hp.eta()), hp.subsample(), hp.colsample()};
         }
 
         private HyperParams fromTransformed(double[] x) {
@@ -531,10 +716,11 @@ public final class HyperparameterTuner {
                 rounds = (int) Math.round(x[DIM_ROUNDS]);
                 rounds = Math.max(ROUNDS_MIN, Math.min(ROUNDS_MAX, ((rounds + 5) / 10) * 10));
             }
-            int depth = Math.max(DEPTH_MIN, Math.min(DEPTH_MAX, (int) Math.round(x[1])));
+            int depth = Math.max(DEPTH_MIN, Math.min((int) upper[DIM_DEPTH], (int) Math.round(x[DIM_DEPTH])));
             float eta = (float) Math.max(ETA_MIN, Math.min(ETA_MAX, Math.exp(x[2])));
             float sub = (float) Math.max(SUB_MIN, Math.min(SUB_MAX, x[3]));
-            return new HyperParams(rounds, depth, eta, sub);
+            float col = (float) Math.max(COL_MIN, Math.min(COL_MAX, x[4]));
+            return new HyperParams(rounds, depth, eta, sub, col);
         }
     }
 
@@ -572,6 +758,34 @@ public final class HyperparameterTuner {
         return folds;
     }
 
+    /** Score one prepared fold with whichever library is being tuned. */
+    private static double evaluateFold(
+            String modelName, PreparedFold fold, int nFeatures, int nClasses, HyperParams hp, int nThreads) {
+        return "XGBoost".equals(modelName)
+                ? evaluateXGBoostFold(
+                        fold.trainData(),
+                        fold.trainLabels(),
+                        fold.trainSize(),
+                        fold.testData(),
+                        fold.testTruth(),
+                        fold.testSize(),
+                        nFeatures,
+                        nClasses,
+                        hp,
+                        nThreads)
+                : evaluateLightGBMFold(
+                        fold.trainData(),
+                        fold.trainLabels(),
+                        fold.trainSize(),
+                        fold.testData(),
+                        fold.testTruth(),
+                        fold.testSize(),
+                        nFeatures,
+                        nClasses,
+                        hp,
+                        nThreads);
+    }
+
     // ── XGBoost fold evaluation ─────────────────────────────────────────────
 
     private static double evaluateXGBoostFold(
@@ -596,8 +810,8 @@ public final class HyperparameterTuner {
             // Shared with the real fit rather than restated here: cross-validation has to score
             // the model that will actually be built, and a locally-maintained copy silently stops
             // matching the moment a parameter is added on the other side.
-            Map<String, Object> params =
-                    XGBoostModel.buildParams(nClasses, hp.maxDepth(), hp.eta(), hp.subsample(), nThreads);
+            Map<String, Object> params = XGBoostModel.buildParams(
+                    nClasses, hp.maxDepth(), hp.eta(), hp.subsample(), hp.colsample(), nThreads);
             params.put("verbosity", 0);
 
             booster = XGBoost.train(trainMat, params, hp.numRounds(), new LinkedHashMap<>(), null, null);
@@ -653,7 +867,8 @@ public final class HyperparameterTuner {
             // min_gain_to_split, so every trial was scored on an unconstrained booster and the
             // winning depth/rate/subsample was then handed to a constrained one — the tuner was
             // optimising a model that never got built.
-            String params = LightGBMModel.buildParams(nClasses, hp.maxDepth(), hp.eta(), hp.subsample(), nThreads);
+            String params = LightGBMModel.buildParams(
+                    nClasses, hp.maxDepth(), hp.eta(), hp.subsample(), hp.colsample(), nThreads);
 
             booster = LGBMBooster.create(dataset, params);
             for (int i = 0; i < hp.numRounds(); i++) {
