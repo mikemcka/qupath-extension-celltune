@@ -3,6 +3,7 @@ package qupath.ext.celltune.model;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 class IntensityHeatmapTest {
@@ -133,5 +134,65 @@ class IntensityHeatmapTest {
         acc.addRow("Alpha", new double[] {3.0});
         IntensityHeatmap.Result r = acc.build();
         assertEquals(List.of("Alpha", "Zeta", IntensityHeatmap.UNCLASSIFIED), r.classNames());
+    }
+
+    // ── selectImageSource (pool the open image live, never from its .qpdata) ─────
+
+    @Test
+    void selectImageSourceReturnsLiveOpenDataWithoutTouchingDiskForTheOpenImage() {
+        String liveData = "live-hierarchy";
+        AtomicInteger diskReads = new AtomicInteger();
+
+        String resolved = IntensityHeatmap.selectImageSource("imgA", "imgA", liveData, () -> {
+            diskReads.incrementAndGet();
+            return "stale-disk-hierarchy";
+        });
+
+        assertSame(liveData, resolved, "the open image must resolve to the live in-memory data");
+        assertEquals(0, diskReads.get(), "disk must never be read for the open image");
+    }
+
+    @Test
+    void selectImageSourceReadsDiskExactlyOnceForNonOpenImages() {
+        String diskData = "disk-hierarchy";
+        AtomicInteger diskReads = new AtomicInteger();
+
+        String resolved = IntensityHeatmap.selectImageSource("imgB", "imgA", "live-hierarchy", () -> {
+            diskReads.incrementAndGet();
+            return diskData;
+        });
+
+        assertSame(diskData, resolved, "a non-open image must resolve to whatever the disk reader supplies");
+        assertEquals(1, diskReads.get(), "disk must be read exactly once for a non-open image");
+    }
+
+    @Test
+    void selectImageSourceTreatsNullOpenNameAsNoOpenImage() {
+        String diskData = "disk-hierarchy";
+        AtomicInteger diskReads = new AtomicInteger();
+
+        String resolved = IntensityHeatmap.selectImageSource("imgA", null, "live-hierarchy", () -> {
+            diskReads.incrementAndGet();
+            return diskData;
+        });
+
+        assertSame(diskData, resolved, "with no open image name, every image must read from disk");
+        assertEquals(1, diskReads.get());
+    }
+
+    @Test
+    void selectImageSourceTreatsNullOpenDataAsNoOpenImage() {
+        // A name match with nothing actually open must still fall through to disk —
+        // never resolve to a null source the pooling loop would dereference.
+        String diskData = "disk-hierarchy";
+        AtomicInteger diskReads = new AtomicInteger();
+
+        String resolved = IntensityHeatmap.selectImageSource("imgA", "imgA", null, () -> {
+            diskReads.incrementAndGet();
+            return diskData;
+        });
+
+        assertSame(diskData, resolved, "a name match with no live data must fall back to disk");
+        assertEquals(1, diskReads.get());
     }
 }
