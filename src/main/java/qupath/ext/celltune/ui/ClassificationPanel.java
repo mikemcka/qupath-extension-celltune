@@ -10,16 +10,20 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
+import qupath.ext.celltune.CellTuneExtension;
 import qupath.ext.celltune.classifier.DataPoolingService;
 import qupath.ext.celltune.classifier.DualModelClassifier;
 import qupath.ext.celltune.classifier.FeaturePruner;
 import qupath.ext.celltune.classifier.ModelType;
 import qupath.ext.celltune.classifier.ResamplingStrategy;
 import qupath.ext.celltune.classifier.UncertaintySampler;
+import qupath.ext.celltune.classifier.XGBoostModel;
 import qupath.ext.celltune.io.GroundTruthIO;
 import qupath.ext.celltune.io.ProjectStateManager;
+import qupath.ext.celltune.io.TrainingLogRecorder;
 import qupath.ext.celltune.model.*;
 import qupath.ext.celltune.model.FeatureNormalizer;
+import qupath.ext.celltune.util.TrainingThreads;
 import qupath.fx.dialogs.Dialogs;
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.objects.PathObject;
@@ -91,6 +95,7 @@ public class ClassificationPanel extends VBox {
     private final ComboBox<ModelType> model2Combo = new ComboBox<>();
     private final CheckBox autoTuneCheckBox = new CheckBox("Auto-tune hyperparameters");
     private final CheckBox earlyStopCheckBox = new CheckBox("Early stopping");
+    private final CheckBox computeMetricsCheckBox = new CheckBox("Train/val metrics");
     private final CheckBox autoPruneCheckBox = new CheckBox("Auto-prune features (drop near-constant & redundant)");
     private final PopulationPanel populationPanel = new PopulationPanel();
 
@@ -139,7 +144,10 @@ public class ClassificationPanel extends VBox {
         });
 
         // ── Hyperparameter controls ──
-        roundsSpinner = new Spinner<>(50, 1000, 200, 50);
+        // A ceiling, not a target: with early stopping on (default) models stop when they stop
+        // improving, so 500 is free for one that converges early and rescues one that doesn't.
+        // Only a literal count when early stopping is off — see the tooltip.
+        roundsSpinner = new Spinner<>(50, 1000, 500, 50);
         roundsSpinner.setEditable(true);
         roundsSpinner.setPrefWidth(90);
         roundsSpinner.setTooltip(new Tooltip(STRINGS.getString("param.num_rounds.help")));
@@ -149,15 +157,40 @@ public class ClassificationPanel extends VBox {
         depthSpinner.setPrefWidth(70);
         depthSpinner.setTooltip(new Tooltip(STRINGS.getString("param.max_depth.help")));
 
-        // Number of parallel workers for the per-image batch prediction step.
-        // Default 1 (safe on memory). Capped at 8 — each worker loads a full slide
-        // hierarchy into memory.
+        // ── The two parallelism controls ──
+        // Deliberately separate, because they are bounded by different resources: one by RAM
+        // (a slide at a time), one by CPU (threads inside one training run). A single combined
+        // "use N of the machine" number could not express "plenty of cores, not much memory".
+        // The labels carry that distinction so the tooltips are not load-bearing.
+
+        // Images in parallel — memory-bound. Each one holds a whole slide's object hierarchy, so
+        // this is capped low and defaults to 1. Only affects the batch-apply step after training.
         workersSpinner = new Spinner<>(1, 8, 1, 1);
         workersSpinner.setEditable(true);
         workersSpinner.setPrefWidth(70);
-        workersSpinner.setTooltip(new Tooltip("Number of parallel workers used when applying the trained classifier "
-                + "to other selected images. Higher = faster but uses more memory "
-                + "(each worker loads a full slide)."));
+        workersSpinner.setTooltip(new Tooltip("How many images are classified at the same time by"
+                + " 'Apply to which images…',\nafter training finishes.\n\n"
+                + "Bounded by memory: each one loads a full slide, so raising it costs RAM"
+                + " rather than CPU.\nHas no effect on training itself, or if no target images"
+                + " are selected."));
+
+        // CPU threads — compute-bound. Applies inside a single training run (both models plus
+        // resampling), and is the total budget, not a per-model figure.
+        Spinner<Integer> cpuThreadsSpinner = new Spinner<>(
+                0,
+                Runtime.getRuntime().availableProcessors(),
+                CellTuneExtension.trainingThreadsProperty().get());
+        cpuThreadsSpinner.setEditable(true);
+        cpuThreadsSpinner.setPrefWidth(70);
+        cpuThreadsSpinner.setTooltip(new Tooltip("How much CPU training may use: threads for"
+                + " XGBoost/LightGBM and resampling\nwithin a single training run.\n\n"
+                + "0 = automatic (all " + Runtime.getRuntime().availableProcessors() + " processors)."
+                + " Lower it to keep the machine responsive\nwhile training.\n\n"
+                + "Bounded by CPU, not memory — unlike 'Images at once'."));
+        cpuThreadsSpinner
+                .valueProperty()
+                .addListener(
+                        (v, o, n) -> CellTuneExtension.trainingThreadsProperty().set(n == null ? 0 : n));
 
         HBox paramRow = new HBox(
                 8,
@@ -165,7 +198,9 @@ public class ClassificationPanel extends VBox {
                 roundsSpinner,
                 new Label(STRINGS.getString("param.max_depth.label")),
                 depthSpinner,
-                new Label("Workers:"),
+                new Label("CPU threads:"),
+                cpuThreadsSpinner,
+                new Label("Images at once:"),
                 workersSpinner);
         paramRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -207,6 +242,12 @@ public class ClassificationPanel extends VBox {
                 new Tooltip(
                         "TPE Bayesian optimisation with cross-validation to find optimal hyperparameters independently per model"));
 
+        computeMetricsCheckBox.setSelected(true);
+        computeMetricsCheckBox.setTooltip(
+                new Tooltip("Train an extra evaluation copy of each model on an 80/20 split to produce the per-class\n"
+                        + "precision/recall/F1 report. These copies are discarded afterwards, so this costs\n"
+                        + "roughly a third of total training time.\n\n"
+                        + "Unchecked: training is faster and the Training Metrics button is unavailable."));
         earlyStopCheckBox.setSelected(true);
         earlyStopCheckBox.setTooltip(
                 new Tooltip("Find optimal boosting rounds via validation loss monitoring (patience=20)"));
@@ -313,6 +354,7 @@ public class ClassificationPanel extends VBox {
                         balancingRow,
                         autoTuneCheckBox,
                         earlyStopCheckBox,
+                        computeMetricsCheckBox,
                         showFeatureImportanceCheckBox,
                         autoPruneCheckBox,
                         restrictToImportedFeaturesCheckBox,
@@ -613,6 +655,17 @@ public class ClassificationPanel extends VBox {
             }
         }
 
+        // Pre-flight heap estimate. The feature matrix plus the native copies each model makes
+        // is the dominant allocation, and resampling inflates the row count before any of that,
+        // so warn while the user can still act (fewer features, or a bigger -Xmx).
+        if (!TrainingMemoryCheck.confirmEnoughHeap(
+                detections.size(),
+                featureNames.size(),
+                labelStore.getClassCounts().values(),
+                getEffectiveResamplingStrategy())) {
+            return;
+        }
+
         // ── Restrict to features shared with imported data ─────────────────
         // When the user has imported ground-truth rows from another project the
         // imported rows only carry values for that project's panel. Aligning to
@@ -705,8 +758,64 @@ public class ClassificationPanel extends VBox {
         dlgProgressBar.progressProperty().bind(classifier.progressProperty());
         dlgStatusLabel.textProperty().bind(classifier.statusProperty());
 
+        // Durable copy of this run's log. The on-screen text area is discarded when the progress
+        // window closes, and is never written at all if the JVM dies — which is exactly the case
+        // (OOM, native crash) worth being able to read afterwards.
+        //
+        // The settings are read here because they come from UI controls, which must be touched on
+        // the FX thread. Opening the file is not: it creates a directory, lists and prunes the
+        // existing logs, then writes a flushed line per header row, and on a project sitting on a
+        // network share that is enough I/O to stall the click. The worker does it instead, so
+        // until it has, this holds a recorder that discards everything.
+        final String logTitle =
+                activeBinaryMarker != null ? "Binary training — " + activeBinaryMarker : "Multi-class training";
+        final List<String[]> logSettings = TrainingLogRecorder.settings(
+                "Cells", detections.size(),
+                "Labelled", labelStore.size(),
+                "Features", featureNames.size(),
+                // Scoped explicitly: pooling adds classes from other images, so this is
+                // routinely lower than the "N classes" the classifier goes on to report,
+                // which read like a contradiction sitting next to each other.
+                "Classes (image)", labelStore.getClassNames().size(),
+                "Balancing", getEffectiveResamplingStrategy(),
+                "Early stop", earlyStopCheckBox.isSelected(),
+                "Metrics", computeMetricsCheckBox.isSelected(),
+                "Auto-tune", autoTuneCheckBox.isSelected(),
+                "Auto-prune", autoPruneCheckBox.isSelected(),
+                "Pool images", poolImagesCheckBox.isSelected(),
+                "Model 1", classifier.getModel1Type(),
+                "Model 2", classifier.getModel2Type(),
+                "CPU threads", TrainingThreads.total(),
+                "Images at once", workersSpinner.getValue(),
+                // Only non-zero when the user has deliberately traded accuracy for speed, and it
+                // changes predictions — so a log that does not record it cannot be compared with
+                // another one.
+                "XGB max_bin",
+                        XGBoostModel.getMaxBin() == 0 ? "256 (default)" : String.valueOf(XGBoostModel.getMaxBin()));
+        final java.util.concurrent.atomic.AtomicReference<TrainingLogRecorder> logRecorderRef =
+                new java.util.concurrent.atomic.AtomicReference<>(TrainingLogRecorder.noOp());
+
+        // Batch the text-area appends. Tuning and batch-apply emit lines faster than the FX
+        // thread can lay out a TextArea, and one runLater per line floods the event queue enough
+        // to visibly stall the UI during the run.
+        final StringBuilder pendingLog = new StringBuilder();
+        final java.util.concurrent.atomic.AtomicBoolean flushQueued = new java.util.concurrent.atomic.AtomicBoolean();
         Consumer<String> trainLog = msg -> {
-            Platform.runLater(() -> logArea.appendText(msg + "\n"));
+            logRecorderRef.get().accept(msg);
+            synchronized (pendingLog) {
+                pendingLog.append(msg).append('\n');
+            }
+            if (flushQueued.compareAndSet(false, true)) {
+                Platform.runLater(() -> {
+                    flushQueued.set(false);
+                    String chunk;
+                    synchronized (pendingLog) {
+                        chunk = pendingLog.toString();
+                        pendingLog.setLength(0);
+                    }
+                    if (!chunk.isEmpty()) logArea.appendText(chunk);
+                });
+            }
         };
 
         // Train in background
@@ -728,6 +837,7 @@ public class ClassificationPanel extends VBox {
         final ResamplingStrategy resamplingStrategy = getEffectiveResamplingStrategy();
         final boolean autoTuneSelected = autoTuneCheckBox.isSelected();
         final boolean earlyStopSelected = earlyStopCheckBox.isSelected();
+        final boolean computeMetricsSelected = computeMetricsCheckBox.isSelected();
         final List<String> finalFeatureNames = featureNames;
         final var projectRef = project;
         final List<GroundTruthIO.TrainingRow> importedRowsSnapshot =
@@ -740,6 +850,12 @@ public class ClassificationPanel extends VBox {
         final int workers = workersSpinner.getValue();
         Thread trainThread = new Thread(
                 () -> {
+                    // Opened here rather than on the FX thread: this touches the filesystem, and
+                    // every header line is flushed individually. Set before any logging so the
+                    // header is the first thing in the file.
+                    final TrainingLogRecorder logRecorder = TrainingLogRecorder.open(projectRef);
+                    logRecorderRef.set(logRecorder);
+                    logRecorder.writeHeader(logTitle, logSettings);
                     try {
                         // Auto-backup labels
                         if (projectRef != null) {
@@ -876,6 +992,7 @@ public class ClassificationPanel extends VBox {
                                 resamplingStrategy,
                                 autoTuneSelected,
                                 earlyStopSelected,
+                                computeMetricsSelected,
                                 trainLog);
 
                         predAll = classifier.getPredALL();
@@ -935,8 +1052,14 @@ public class ClassificationPanel extends VBox {
                             }
                         }
 
+                        // Batch-apply is timed into the same breakdown as training. On a project of
+                        // whole slides it is routinely the largest single block of the wait, and a
+                        // summary that stopped at "Done." reported a wall clock the user could see
+                        // was wrong.
+                        var runTimer = classifier.getPhaseTimer();
                         int batchApplied = 0;
                         if (projectRef != null && !batchTargetImages.isEmpty()) {
+                            if (runTimer != null) runTimer.start("apply to other images");
                             batchApplied = TrainingOrchestrator.applyToTargetImages(
                                     projectRef,
                                     imageData,
@@ -948,6 +1071,7 @@ public class ClassificationPanel extends VBox {
                                     this,
                                     trainLog);
                         }
+                        if (runTimer != null) runTimer.writeSummary();
 
                         final int totalBatchApplied = batchApplied;
                         Platform.runLater(() -> {
@@ -1006,7 +1130,36 @@ public class ClassificationPanel extends VBox {
                             }
                             Dialogs.showInfoNotification(STRINGS.getString("name"), completionMessage);
                         });
-                    } catch (Exception ex) {
+                    } catch (Exception | OutOfMemoryError ex) {
+                        // OutOfMemoryError is an Error, not an Exception: before this it escaped
+                        // the handler entirely, killing the worker silently and leaving the
+                        // progress dialog spinning with the Train button stuck disabled.
+                        boolean oom = ex instanceof OutOfMemoryError;
+                        var timer = classifier.getPhaseTimer();
+                        String phase =
+                                timer != null && timer.currentPhase() != null ? timer.currentPhase() : "training";
+                        logRecorder.recordFailure(phase, ex);
+                        if (oom) {
+                            // Release the biggest retained graph before formatting anything, so
+                            // the handler itself has room to run.
+                            long peakMb = timer != null ? timer.peakHeapBytes() / (1024 * 1024) : 0;
+                            long maxMb = Runtime.getRuntime().maxMemory() / (1024 * 1024);
+                            logRecorder.accept(String.format(
+                                    "!! Out of memory during '%s' — peak heap %,d MB of %,d MB", phase, peakMb, maxMb));
+                        }
+                        // No close() here — the finally below runs as soon as this block ends,
+                        // which is before the runLater below can reach the FX thread, so the file
+                        // is complete by the time the dialog quotes its path.
+                        final String message = oom
+                                ? String.format(
+                                        "Out of memory during '%s'.%n%n"
+                                                + "The JVM heap is %,d MB. To increase it: Edit → Preferences →"
+                                                + " 'Maximum memory', then restart QuPath.%n"
+                                                + "To need less memory: select fewer features, or set Balancing"
+                                                + " to None.",
+                                        phase, Runtime.getRuntime().maxMemory() / (1024 * 1024))
+                                : "Training failed: " + ex.getMessage();
+                        final String logPath = logRecorder.getFile() != null ? "\nLog: " + logRecorder.getFile() : "";
                         Platform.runLater(() -> {
                             progressBar.progressProperty().unbind();
                             statusLabel.textProperty().unbind();
@@ -1016,10 +1169,12 @@ public class ClassificationPanel extends VBox {
                             dlgStatusLabel.textProperty().unbind();
                             dlgProgressBar.setProgress(0);
                             dlgStatusLabel.setText("Training failed!");
-                            logArea.appendText("\nERROR: " + ex.getMessage() + "\n");
+                            logArea.appendText("\nERROR: " + message + logPath + "\n");
                             trainButton.setDisable(false);
-                            Dialogs.showErrorMessage(STRINGS.getString("name"), "Training failed: " + ex.getMessage());
+                            Dialogs.showErrorMessage(STRINGS.getString("name"), message + logPath);
                         });
+                    } finally {
+                        logRecorder.close();
                     }
                 },
                 "CellTune-Training");

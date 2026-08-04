@@ -12,6 +12,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.celltune.util.TrainingThreads;
 
 /**
  * Wraps LightGBM4J training and prediction behind the same style interface
@@ -116,48 +117,35 @@ public class LightGBMModel {
         // Build parameter string
         String params = buildParams(nClasses, maxDepth, learningRate, subsample);
 
-        // Attempt GPU training, fall back to CPU
-        boolean usingGpu = false;
-        try {
-            String gpuParams = params + " device_type=gpu";
-            logger.info("LightGBM: attempting GPU training…");
-            booster = LGBMBooster.create(dataset, gpuParams);
-            for (int i = 0; i < numRounds; i++) {
-                booster.updateOneIter();
-            }
-            usingGpu = true;
-            logger.info(
-                    "LightGBM training: GPU — {} samples, {} features, {} classes, {} rounds",
-                    nSamples,
-                    nFeatures,
-                    nClasses,
-                    numRounds);
-        } catch (Exception gpuEx) {
-            logger.info("LightGBM GPU not available ({}), falling back to CPU", gpuEx.getMessage());
-            // Re-create booster with CPU params
-            if (booster != null) {
-                try {
-                    booster.close();
-                } catch (Exception ignore) {
-                }
-            }
-            booster = LGBMBooster.create(dataset, params);
-            for (int i = 0; i < numRounds; i++) {
-                booster.updateOneIter();
-            }
-            logger.info(
-                    "LightGBM training: CPU — {} samples, {} features, {} classes, {} rounds",
-                    nSamples,
-                    nFeatures,
-                    nClasses,
-                    numRounds);
+        // This build pins the CPU-only lightgbm4j artifact (see build.gradle.kts:
+        // "io.github.metarank:lightgbm4j"). No GPU kernels are shipped, so device_type=gpu can
+        // never succeed. The previous probe-and-fallback ran a *full* numRounds loop under GPU
+        // params on every train() call before failing — and if it failed part-way through, that
+        // work was discarded and CPU training restarted from round 0. Always train on CPU here.
+        // If/when a GPU artifact is wired in, restore the probe-and-fallback logic.
+        // (Same reasoning, same conclusion, as XGBoostModel.train.)
+        booster = LGBMBooster.create(dataset, params);
+        for (int i = 0; i < numRounds; i++) {
+            // Do NOT break on updateOneIter()'s return. It is LightGBM's is_finished, and the
+            // tempting reading — "no split is worth making any more, so the rest are no-ops" — is
+            // wrong. It reports that *this iteration* added nothing, not that training has
+            // converged. With min_gain_to_split=10 and bagging_freq=1 the row sample changes every
+            // iteration, so a barren iteration is routinely followed by productive ones: measured
+            // on a multiclass fixture it went true at round 72, false again at 100, and validation
+            // loss kept improving to round 119. Breaking on it silently truncates the model.
+            booster.updateOneIter();
         }
+        logger.info(
+                "LightGBM training: CPU — {} samples, {} features, {} classes, {} rounds",
+                nSamples,
+                nFeatures,
+                nClasses,
+                numRounds);
 
         // Close dataset — booster keeps its own copy
         dataset.close();
 
-        logger.info("LightGBM training complete ({})", usingGpu ? "GPU" : "CPU");
-        lastDevice = usingGpu ? "GPU" : "CPU";
+        lastDevice = "CPU";
     }
 
     /** @return the device used for the last training run */
@@ -196,16 +184,64 @@ public class LightGBMModel {
         String params = buildParams(nClasses, maxDepth, learningRate, subsample);
         LGBMBooster booster = LGBMBooster.create(dataset, params);
 
+        // Register the validation fold with the booster so LightGBM scores it natively. It keeps
+        // a running raw score per validation row and adds only the new trees each iteration, so
+        // the whole search costs O(rounds); calling predictForMat per round instead re-scored
+        // every tree from scratch and re-marshalled the fold across JNI, making it O(rounds²).
+        //
+        // The reference dataset is mandatory, not cosmetic: LightGBM rejects a validation set
+        // whose feature bin mappers differ from the training set's.
+        LGBMDataset valDataset = null;
+        int metricIdx = -1;
+        try {
+            valDataset = LGBMDataset.createFromMat(valData, valSize, nFeatures, true, "", dataset);
+            valDataset.setField("label", valLabels);
+            booster.addValidData(valDataset);
+            metricIdx = resolveMetricIndex(booster.getEvalNames(), nClasses);
+        } catch (Exception ex) {
+            logger.info("LightGBM native validation metric unavailable ({}); scoring manually", ex.getMessage());
+            metricIdx = -1;
+        }
+
         try {
             double bestLoss = Double.MAX_VALUE;
             int bestRound = 0;
+            // One-way latch: native scoring is used until it misbehaves, after which the rest of
+            // the search is scored manually and never switches back. It cannot oscillate, so the
+            // change can never end up slower than the old always-manual path.
+            //
+            // A mid-search fallback does compare a manual loss against a best-so-far that came
+            // from LightGBM, which is only sound because they are the same quantity: mean log-loss
+            // over the same validation rows, same formula, same /n. They differ at most by
+            // LightGBM's internal probability clamp. Nothing here relies on tighter agreement than
+            // that, and reaching this path at all means getEval already returned a non-finite
+            // value, which does not happen in a healthy run.
+            boolean useNative = metricIdx >= 0;
 
             for (int round = 0; round < maxRounds; round++) {
+                // The return value (is_finished) is deliberately ignored — see train(). It marks a
+                // barren iteration, not convergence, and stopping on it cut the search short by
+                // dozens of rounds while validation loss was still falling.
                 booster.updateOneIter();
 
-                double[] preds =
-                        booster.predictForMat(valData, valSize, nFeatures, true, PredictionType.C_API_PREDICT_NORMAL);
-                double loss = computeLogloss(preds, valLabels, valSize, nClasses);
+                double loss = Double.NaN;
+                if (useNative) {
+                    try {
+                        double[] evals = booster.getEval(1); // 0 = training data, 1 = first valid set
+                        loss = (metricIdx < evals.length) ? evals[metricIdx] : Double.NaN;
+                    } catch (Exception ex) {
+                        loss = Double.NaN;
+                    }
+                    if (!Double.isFinite(loss)) {
+                        logger.info("LightGBM getEval returned no usable value; falling back to manual scoring");
+                        useNative = false;
+                    }
+                }
+                if (!useNative) {
+                    double[] preds = booster.predictForMat(
+                            valData, valSize, nFeatures, true, PredictionType.C_API_PREDICT_NORMAL);
+                    loss = computeLogloss(preds, valLabels, valSize, nClasses);
+                }
 
                 if (loss < bestLoss) {
                     bestLoss = loss;
@@ -221,8 +257,41 @@ public class LightGBMModel {
 
         } finally {
             booster.close();
+            if (valDataset != null) {
+                try {
+                    valDataset.close();
+                } catch (Exception ignore) {
+                }
+            }
             dataset.close();
         }
+    }
+
+    /**
+     * Picks the index of the log-loss metric among the booster's configured eval metrics.
+     * <p>
+     * {@code buildParams} configures exactly one ({@code binary_logloss} or {@code multi_logloss},
+     * matching {@link #computeLogloss}), but the name is matched rather than assumed so that
+     * adding a metric later cannot silently start early-stopping on the wrong one.
+     *
+     * @return the index, or {@code -1} if no log-loss metric is present
+     */
+    static int resolveMetricIndex(String[] evalNames, int nClasses) {
+        if (evalNames == null || evalNames.length == 0) {
+            return -1;
+        }
+        String expected = nClasses == 2 ? "binary_logloss" : "multi_logloss";
+        for (int i = 0; i < evalNames.length; i++) {
+            if (expected.equals(evalNames[i])) {
+                return i;
+            }
+        }
+        for (int i = 0; i < evalNames.length; i++) {
+            if (evalNames[i] != null && evalNames[i].endsWith("logloss")) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /** Compute mean log-loss from raw LightGBM predictions. */
@@ -423,6 +492,22 @@ public class LightGBMModel {
     // ── Private helpers ─────────────────────────────────────────────────────────
 
     private static String buildParams(int nClasses, int maxDepth, float learningRate, float subsample) {
+        return buildParams(nClasses, maxDepth, learningRate, subsample, TrainingThreads.total());
+    }
+
+    /**
+     * The single definition of how a LightGBM booster in this extension is configured.
+     * <p>
+     * {@link HyperparameterTuner} must call this rather than assembling its own string. It used to
+     * do the latter and omitted {@code min_gain_to_split}, so cross-validation scored unconstrained
+     * boosters and then handed the winning depth/rate/subsample to a constrained one — the tuner
+     * was optimising a model that never got built. Any parameter added here must reach both paths
+     * or the same class of bug comes back.
+     *
+     * @param numThreads thread budget for this booster; the tuner divides the total across its
+     *                   concurrently-evaluated folds rather than letting each request every core
+     */
+    static String buildParams(int nClasses, int maxDepth, float learningRate, float subsample, int numThreads) {
         StringBuilder sb = new StringBuilder();
         if (nClasses == 2) {
             sb.append("objective=binary metric=binary_logloss");
@@ -435,7 +520,7 @@ public class LightGBMModel {
         sb.append(" bagging_freq=1");
         sb.append(" feature_fraction=0.8");
         sb.append(" min_gain_to_split=10");
-        sb.append(" num_threads=").append(Runtime.getRuntime().availableProcessors());
+        sb.append(" num_threads=").append(numThreads);
         sb.append(" seed=42");
         sb.append(" verbosity=-1"); // suppress LightGBM logs
         return sb.toString();

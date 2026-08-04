@@ -66,6 +66,18 @@ tasks.jar {
     }
 }
 
+// ── Tests ───────────────────────────────────────────────────────────────────
+// Forward `-Dcelltune.*` from the Gradle CLI into the test JVM. Gradle does not
+// propagate system properties to forked test workers, and the performance
+// benchmarks (e.g. ResamplerBenchmark) are gated on `celltune.bench` so they
+// stay out of normal `./gradlew test` runs.
+tasks.test {
+    System.getProperties().forEach { key, value ->
+        val name = key.toString()
+        if (name.startsWith("celltune.")) systemProperty(name, value.toString())
+    }
+}
+
 // ── Static analysis (SpotBugs) ──────────────────────────────────────────────
 // Reporting only: establishes a baseline of potential bugs without blocking the
 // build. Run `./gradlew spotbugsMain` and open the HTML report (path printed

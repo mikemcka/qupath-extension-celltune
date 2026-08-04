@@ -154,14 +154,39 @@ final class TrainingOrchestrator {
         var currentEntry = project.getEntry(currentImageData);
         String currentImageName = currentEntry != null ? currentEntry.getImageName() : null;
 
+        // Resolve the work list before announcing anything. The open image is already classified
+        // by the main run and some names may not resolve to a project entry, so the requested
+        // count is not what will actually be saved — reporting progress against it produced a
+        // final "Saved (13/14)" that read as a silently dropped image.
+        var entries = new ArrayList<ProjectImageEntry<BufferedImage>>();
+        for (String imgName : targetImages) {
+            if (currentImageName != null && currentImageName.equals(imgName)) {
+                trainLog.accept("[" + imgName + "] Already classified as the open image — not repeating it");
+                continue;
+            }
+            var entryOpt = project.getImageList().stream()
+                    .filter(en -> en.getImageName().equals(imgName))
+                    .findFirst();
+            if (entryOpt.isEmpty()) {
+                trainLog.accept("[" + imgName + "] Skipped — no matching entry in the project");
+                continue;
+            }
+            entries.add(entryOpt.get());
+        }
+
+        final int toApply = entries.size();
+        if (toApply == 0) {
+            trainLog.accept("No target images left to classify.");
+            return 0;
+        }
+
         // Parallelise per-image classification using the user-chosen worker
         // count from the sidebar spinner. Capped at the number of target
         // images. Booster.predict in XGBoost4J / LightGBM4J is thread-safe
         // and predictOnly(populateSets=false) does not mutate shared state.
-        int parallelism = Math.min(workers, targetImages.size());
+        int parallelism = Math.min(workers, toApply);
         parallelism = Math.max(1, parallelism);
-        trainLog.accept("Applying classifier to " + targetImages.size() + " target image(s) using " + parallelism
-                + " worker(s)…");
+        trainLog.accept("Applying classifier to " + toApply + " target image(s), " + parallelism + " at once…");
 
         var poolExec = Executors.newFixedThreadPool(parallelism, r -> {
             Thread t = new Thread(r, "CellTune-BatchPredict");
@@ -171,16 +196,8 @@ final class TrainingOrchestrator {
         var appliedCounter = new AtomicInteger(0);
         var futures = new ArrayList<Future<?>>();
 
-        for (String imgName : targetImages) {
-            if (currentImageName != null && currentImageName.equals(imgName)) continue;
-
-            var entryOpt = project.getImageList().stream()
-                    .filter(en -> en.getImageName().equals(imgName))
-                    .findFirst();
-            if (entryOpt.isEmpty()) continue;
-
-            final var entry = entryOpt.get();
-            final String imgNameFinal = imgName;
+        for (var entry : entries) {
+            final String imgNameFinal = entry.getImageName();
             futures.add(poolExec.submit(() -> {
                 try {
                     trainLog.accept("[" + imgNameFinal + "] Loading…");
@@ -220,7 +237,7 @@ final class TrainingOrchestrator {
                                 + persistEx.getMessage());
                     }
                     int n = appliedCounter.incrementAndGet();
-                    trainLog.accept("[" + imgNameFinal + "] Saved (" + n + "/" + targetImages.size() + ")");
+                    trainLog.accept("[" + imgNameFinal + "] Saved (" + n + "/" + toApply + ")");
                 } catch (Exception ex) {
                     trainLog.accept("[" + imgNameFinal + "] ERROR: " + ex.getMessage());
                 }
