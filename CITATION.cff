@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below. Please also cite the CellTune preprint (doi:10.1101/2025.05.05.652215)."
+title: "CellTune: an active-learning cell classifier extension for QuPath"
+abstract: >-
+  A QuPath extension for classifying cells in highly multiplexed images. It trains two
+  different gradient-boosted models on manually labelled cells, then uses their disagreement
+  to pick the most informative cells for review, so a usable classifier can be built from a
+  few hundred labels rather than thousands.
+type: software
+authors:
+  - family-names: Mckay
+    given-names: Michael
+    orcid: "https://orcid.org/0009-0002-2447-9506"
+    affiliation: "Walter and Eliza Hall Institute of Medical Research"
+# Concept DOI — always resolves to the latest release. Use this rather than a
+# version-specific DOI so citations do not go stale.
+doi: 10.5281/zenodo.21782421
+version: 0.2.4
+date-released: "2026-08-04"
+license: GPL-3.0-only
+repository-code: "https://github.com/mikemcka/qupath-extension-celltune"
+keywords:
+  - QuPath
+  - multiplexed imaging
+  - cell classification
+  - active learning
+  - spatial biology
+  - image analysis
+  - machine learning
+  - bioimage analysis
