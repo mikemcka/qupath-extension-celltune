@@ -201,6 +201,42 @@ public class NeighborhoodHeatmapView {
         stage.toFront();
     }
 
+    /** Close (hide) the heatmap window. The instance stays reusable via {@link #show()}. */
+    public void close() {
+        stage.close();
+    }
+
+    // ── Toggle state (read/restored by the owner so it survives a reopen) ────────
+
+    /** Whether the "Show mean fractions" values overlay is on. */
+    public boolean isShowValues() {
+        return showValuesBox.isSelected();
+    }
+
+    /** Whether "Merge rows by class" is on. */
+    public boolean isMergeRows() {
+        return mergeBox.isSelected();
+    }
+
+    /** Whether the row-key swatches are coloured by diversity. */
+    public boolean isDiversitySwatch() {
+        return diversitySwatchBox.isSelected();
+    }
+
+    /**
+     * Restore the three view toggles at once (e.g. from a previous window before a
+     * new run rebuilt it), redrawing once. The diversity swatch is only applied when
+     * a diversity colour function is available.
+     */
+    public void setToggleState(boolean showValues, boolean mergeRows, boolean diversitySwatch) {
+        showValuesBox.setSelected(showValues);
+        mergeBox.setSelected(mergeRows);
+        if (!diversitySwatchBox.isDisabled()) {
+            diversitySwatchBox.setSelected(diversitySwatch);
+        }
+        redraw();
+    }
+
     // ── Naming / merge panel ─────────────────────────────────────────────────
 
     private VBox buildNamingPanel() {
