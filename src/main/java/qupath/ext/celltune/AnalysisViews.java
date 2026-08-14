@@ -54,6 +54,11 @@ final class AnalysisViews {
 
     private AnalysisViews() {} // utility class
 
+    // Retained scatter/clustering window, reused across menu launches for the same open image so its
+    // clustering results survive a close/reopen (the user need not re-select measurements or re-cluster).
+    // Dropped when a different image is open, since its cached cells/fit would be stale.
+    private static ScatterPlotView openScatterPlot;
+
     /** Open the same-class / cross-class distance-measurement dialog. */
     static void showDistanceMeasurements(QuPathGUI qupath) {
         if (qupath.getProject() == null) {
@@ -148,6 +153,21 @@ final class AnalysisViews {
             return;
         }
 
+        String currentImageName = resolveImageName(qupath, imageData);
+
+        // Reuse the retained plot so its clustering results survive a close/reopen — skip the
+        // measurement picker and re-cluster entirely. A project-scope plot is reusable regardless
+        // of the active image; a current-image plot only for the same image. Otherwise its cached
+        // cells/fit are stale, so drop the old window and build fresh below.
+        if (openScatterPlot != null) {
+            if (openScatterPlot.isReusableFor(currentImageName)) {
+                openScatterPlot.show();
+                return;
+            }
+            openScatterPlot.close();
+            openScatterPlot = null;
+        }
+
         List<PathObject> cells = imageData.getHierarchy().getObjects(null, PathObject.class).stream()
                 .filter(PathObjectFilter.DETECTIONS_ALL)
                 .toList();
@@ -176,28 +196,41 @@ final class AnalysisViews {
             return;
         }
 
-        String currentImageName = null;
+        // "New…" in the plot forces a fresh one: drop the retained window and re-enter this method,
+        // which (with nothing retained) re-runs the measurement picker and builds a new plot.
+        Runnable onNewPlot = () -> {
+            if (openScatterPlot != null) {
+                openScatterPlot.close();
+                openScatterPlot = null;
+            }
+            showScatterPlot(qupath, liveCurrentPredictions, normalizer, openClassControl);
+        };
+
+        openScatterPlot = new ScatterPlotView(
+                qupath.getStage(),
+                qupath,
+                currentImageName,
+                markerFeatures,
+                cells,
+                liveCurrentPredictions,
+                openClassControl,
+                normalizer,
+                onNewPlot);
+        openScatterPlot.show();
+    }
+
+    /** Resolve the open image's display name (project entry name, else server metadata name). */
+    private static String resolveImageName(QuPathGUI qupath, qupath.lib.images.ImageData<BufferedImage> imageData) {
         var project = qupath.getProject();
         if (project != null) {
             var entry = project.getEntry(imageData);
-            if (entry != null) {
-                currentImageName = entry.getImageName();
+            if (entry != null
+                    && entry.getImageName() != null
+                    && !entry.getImageName().isBlank()) {
+                return entry.getImageName();
             }
         }
-        if (currentImageName == null || currentImageName.isBlank()) {
-            currentImageName = imageData.getServer().getMetadata().getName();
-        }
-
-        new ScatterPlotView(
-                        qupath.getStage(),
-                        qupath,
-                        currentImageName,
-                        markerFeatures,
-                        cells,
-                        liveCurrentPredictions,
-                        openClassControl,
-                        normalizer)
-                .show();
+        return imageData.getServer().getMetadata().getName();
     }
 
     /**
