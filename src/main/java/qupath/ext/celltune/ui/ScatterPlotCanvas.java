@@ -98,9 +98,22 @@ final class ScatterPlotCanvas {
 
     // ── Current view geometry (recomputed each redraw) ─────────────────────────
     private double minX, maxX, minY, maxY;
-    // Cached marker range for MARKER colour mode (recomputed per redraw).
+    // Cached marker range for MARKER colour mode. markerLo/markerHi are percentile bounds (not raw
+    // min/max) so a handful of very bright cells can't compress everyone else into one colour. The
+    // percentile scan sorts, so it is cached and only redone when the marker, the plotted sample, or
+    // the row count changes — never on a plain pan/zoom/selection redraw.
     private int markerColIdx = -1;
     private double markerLo, markerHi;
+    private String markerRangeName;
+    private double[][] markerRangeRaw;
+    private int markerRangeRows = -1;
+
+    // Percentile bounds + perceptual stretch for the marker ramp. Biological markers have a long
+    // bright tail (few strong positives), so clamping to [2%, 98%] and bending the low end with a
+    // gamma < 1 spreads the dim majority across the ramp instead of leaving them a flat blue.
+    private static final double MARKER_LO_PCT = 0.02;
+    private static final double MARKER_HI_PCT = 0.98;
+    private static final double MARKER_GAMMA = 0.7;
 
     // ── Cluster-legend hit-testing geometry (updated each drawLegend) ──────────
     private double legendClusterX, legendClusterY, legendClusterLineH;
@@ -322,24 +335,63 @@ final class ScatterPlotCanvas {
         return toFxColor(pc.getColor());
     }
 
-    /** Precompute the selected marker's min/max over plotted cells (once per redraw). */
+    /**
+     * Precompute the selected marker's percentile colour bounds over the plotted cells. Cached: the
+     * sort is skipped when the marker, sample and row count are unchanged (pan/zoom/selection).
+     */
     private void computeMarkerRange() {
         markerColIdx = model.markerFeatures().indexOf(model.markerName());
-        markerLo = Double.POSITIVE_INFINITY;
-        markerHi = Double.NEGATIVE_INFINITY;
         if (markerColIdx < 0) {
+            markerLo = 0;
+            markerHi = 1;
             return;
         }
+        String name = model.markerName();
         int n = model.nRows();
-        double[] ex = model.ex();
         double[][] raw = model.raw();
+        if (java.util.Objects.equals(name, markerRangeName) && raw == markerRangeRaw && n == markerRangeRows) {
+            return; // range still valid — reuse it
+        }
+        double[] ex = model.ex();
+        double[] vals = new double[n];
+        int m = 0;
         for (int r = 0; r < n; r++) {
             if (Double.isNaN(ex[r])) {
                 continue;
             }
-            markerLo = Math.min(markerLo, raw[r][markerColIdx]);
-            markerHi = Math.max(markerHi, raw[r][markerColIdx]);
+            double v = raw[r][markerColIdx];
+            if (!Double.isNaN(v)) {
+                vals[m++] = v;
+            }
         }
+        if (m == 0) {
+            markerLo = 0;
+            markerHi = 1;
+        } else {
+            double[] sorted = java.util.Arrays.copyOf(vals, m);
+            java.util.Arrays.sort(sorted);
+            markerLo = percentile(sorted, MARKER_LO_PCT);
+            markerHi = percentile(sorted, MARKER_HI_PCT);
+            if (markerHi - markerLo < 1e-9) {
+                // Degenerate (nearly constant marker) — fall back to the full span so it isn't all mid-grey.
+                markerLo = sorted[0];
+                markerHi = sorted[m - 1];
+            }
+        }
+        markerRangeName = name;
+        markerRangeRaw = raw;
+        markerRangeRows = n;
+    }
+
+    /** Linear-interpolated percentile of an ascending array; {@code p} in [0,1]. */
+    private static double percentile(double[] sorted, double p) {
+        if (sorted.length == 1) {
+            return sorted[0];
+        }
+        double idx = p * (sorted.length - 1);
+        int lo = (int) Math.floor(idx);
+        int hi = (int) Math.ceil(idx);
+        return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
     }
 
     private Color markerColor(int i) {
@@ -348,7 +400,16 @@ final class ScatterPlotCanvas {
         }
         double[][] raw = model.raw();
         double t = (markerHi - markerLo < 1e-9) ? 0.5 : (raw[i][markerColIdx] - markerLo) / (markerHi - markerLo);
-        return gradient(t);
+        return markerRamp(t);
+    }
+
+    /**
+     * Marker colour for a normalised value {@code t} in [0,1]: clamp, apply the gamma stretch, then
+     * map through {@link #gradient}. Shared by the points and the legend colourbar so they agree.
+     */
+    private static Color markerRamp(double t) {
+        double c = Math.max(0, Math.min(1, t));
+        return gradient(Math.pow(c, MARKER_GAMMA));
     }
 
     /** Blue (low) → red (high) gradient. */
@@ -424,7 +485,7 @@ final class ScatterPlotCanvas {
             double stepH = barH / steps;
             for (int s = 0; s < steps; s++) {
                 double t = 1 - s / (double) (steps - 1);
-                gc.setFill(gradient(t));
+                gc.setFill(markerRamp(t));
                 gc.fillRect(x, y + s * stepH, sw, stepH + 1);
             }
             gc.setFill(Color.gray(0.2));

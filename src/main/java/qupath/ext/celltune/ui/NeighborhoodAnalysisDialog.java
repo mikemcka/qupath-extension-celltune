@@ -269,6 +269,12 @@ public class NeighborhoodAnalysisDialog {
     private List<ProjectImageEntry<BufferedImage>> lastCohortEntries = List.of(); // entries in the last cohort run
     private int lastWorkers = 1; // worker count from the last cohort run (reused for cohort-wide naming)
 
+    // Retained heatmap window, reused across "Show heatmap" clicks so its toggles/names/geometry
+    // survive a reopen. heatmapViewData is the lastCnMean it was built from — an identity mismatch
+    // means a new run replaced the data and the window must be rebuilt.
+    private NeighborhoodHeatmapView heatmapView;
+    private double[][] heatmapViewData;
+
     public NeighborhoodAnalysisDialog(QuPathGUI qupath) {
         this.qupath = qupath;
         var imageData = qupath.getImageData();
@@ -1081,18 +1087,37 @@ public class NeighborhoodAnalysisDialog {
     }
 
     private void openHeatmap() {
-        new NeighborhoodHeatmapView(
-                        stage,
-                        lastTitle,
-                        lastTypeNames,
-                        lastCnMean,
-                        lastCnCounts,
-                        cnDisplayColors,
-                        new LinkedHashMap<>(lastNames),
-                        this::applyCnClasses,
-                        (code, total) -> categoricalColor(code - 1),
-                        this::diversityColor)
-                .show();
+        // Reuse the same window when the run data is unchanged: the same instance
+        // keeps its toggles (show values / merge / diversity swatch), typed names and
+        // window geometry, so closing and reopening it preserves everything.
+        if (heatmapView != null && heatmapViewData == lastCnMean) {
+            heatmapView.show();
+            return;
+        }
+        // Data changed (a new run) — rebuild, carrying the previous window's toggles
+        // over, and dispose the stale window so we never leave two open.
+        boolean showValues = heatmapView == null || heatmapView.isShowValues();
+        boolean mergeRows = heatmapView != null && heatmapView.isMergeRows();
+        boolean diversitySwatch = heatmapView != null && heatmapView.isDiversitySwatch();
+        if (heatmapView != null) {
+            heatmapView.close();
+        }
+        // Owned by the QuPath main stage (not this dialog) so closing the analysis
+        // dialog leaves the heatmap open.
+        heatmapView = new NeighborhoodHeatmapView(
+                qupath.getStage(),
+                lastTitle,
+                lastTypeNames,
+                lastCnMean,
+                lastCnCounts,
+                cnDisplayColors,
+                new LinkedHashMap<>(lastNames),
+                this::applyCnClasses,
+                (code, total) -> categoricalColor(code - 1),
+                this::diversityColor);
+        heatmapViewData = lastCnMean;
+        heatmapView.setToggleState(showValues, mergeRows, diversitySwatch);
+        heatmapView.show();
     }
 
     /** A type list + per-CN mean composition with all-zero (unused) type columns removed. */

@@ -49,7 +49,6 @@ public class RandomForestModel {
     private List<String> classNames;
     private List<String> featureNames;
     private int nTrees;
-    private String lastDevice = "CPU";
 
     /**
      * Synthetic, formula-safe feature column names ({@code f0..f{p-1}}). Real
@@ -126,13 +125,7 @@ public class RandomForestModel {
         this.forest = RandomForest.fit(
                 formula, df, numRounds, mtry, SplitRule.ENTROPY, maxDepth, maxNodes, NODE_SIZE, subsampleRate);
 
-        this.lastDevice = "CPU";
         logger.info("Random Forest training complete ({} trees)", nTrees);
-    }
-
-    /** @return the device used for the last training run */
-    public String getLastDevice() {
-        return lastDevice;
     }
 
     // ── Prediction ──────────────────────────────────────────────────────────────

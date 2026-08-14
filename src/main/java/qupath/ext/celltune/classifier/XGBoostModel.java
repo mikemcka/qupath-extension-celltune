@@ -28,7 +28,6 @@ public class XGBoostModel {
     private int nClasses;
     private List<String> classNames;
     private List<String> featureNames;
-    private String lastDevice = "unknown";
 
     // ── Training ────────────────────────────────────────────────────────────────
 
@@ -78,20 +77,15 @@ public class XGBoostModel {
             // Dropping it leaves the model bit-identical.
             Map<String, DMatrix> watches = new LinkedHashMap<>();
 
-            // device=cpu and tree_method=hist come from buildParams. This build pins the CPU-only
-            // xgboost4j artifact (see build.gradle.kts: "ml.dmlc:xgboost4j_2.13"), whose CUDA
-            // kernels are NOT shipped — device=cuda is silently ignored by XGBoost and falls back
-            // to CPU without throwing, which previously caused us to mis-report GPU. If/when a
-            // -gpu artifact is wired in, restore the probe-and-fallback logic.
+            // device=cpu and tree_method=hist come from buildParams — this build pins the CPU-only
+            // xgboost4j artifact (see build.gradle.kts: "ml.dmlc:xgboost4j_2.13").
             booster = XGBoost.train(trainMat, params, numRounds, watches, null, null);
             logger.info(
-                    "XGBoost training: CPU — {} samples, {} features, {} classes, {} rounds",
+                    "XGBoost training: {} samples, {} features, {} classes, {} rounds",
                     nSamples,
                     nFeatures,
                     nClasses,
                     numRounds);
-
-            this.lastDevice = "CPU";
         } finally {
             trainMat.dispose();
         }
@@ -103,12 +97,7 @@ public class XGBoostModel {
         booster.setFeatureNames(safeNames);
         booster.setAttr("class_names", String.join(",", classNames));
 
-        logger.info("XGBoost training complete ({})", lastDevice);
-    }
-
-    /** @return the device used for the last training run */
-    public String getLastDevice() {
-        return lastDevice;
+        logger.info("XGBoost training complete");
     }
 
     // ── Early Stopping ──────────────────────────────────────────────────────────

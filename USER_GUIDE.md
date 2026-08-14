@@ -345,7 +345,7 @@ Defaults work for ~90% of cases. Switch to `SMOTE` alone if Tomek is removing to
 
 **Models 1 & 2.** Default pair is **XGBoost + LightGBM**. Random Forest is also available. Keep the two model types **different** — that's the whole point of dual-model disagreement. Auto-tune runs independently per model.
 
-**Training uses the CPU, not the graphics card.** Both models report `CPU` in the progress dialog. A GPU wouldn't help at this scale anyway — it only starts to pay off with far more labelled cells than a typical panel has.
+**Training uses the CPU.** This is a CPU-only build; there is no benefit at this scale anyway — a graphics card only starts to pay off with far more labelled cells than a typical panel has.
 
 **Rounds / Max depth.** Default 500 rounds, depth 6.
 
@@ -715,6 +715,16 @@ embedding on a background thread.
   same interactive plot, so you can name and assign clusters across the whole
   cohort — see §[11.5](#115-project-wide-clustering-across-images). Switching to
   *Project* reveals an **Images…** button and a **Sample:** spinner.
+- **Re-sample** — draw a fresh random sample of cells at the current **Sample:**
+  cap and re-fit (project scope; in current-image scope it re-draws the plotted
+  subsample). Unlike **Recompute**, which re-fits on the *existing* rows.
+- **New clustering session** (next to Re-sample) — start over from scratch:
+  re-opens the *Select Measurements* dialog so you can pick a different marker
+  set or scope, then builds a fresh plot. You only need this to **change the
+  inputs** — the plot now **remembers its clustering between closing and
+  reopening** the window (reopen it from the menu and your clusters, scope and
+  fit are restored as they were, with no re-clustering), so *New clustering
+  session* is the deliberate way to discard that and begin again.
 
 **Filter row (this is the gating row)**
 - **Annotation** — type a keyword to cluster only cells whose centroid falls

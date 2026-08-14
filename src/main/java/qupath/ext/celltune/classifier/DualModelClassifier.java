@@ -654,7 +654,6 @@ public class DualModelClassifier {
                 mdl1Eta,
                 mdl1Sub,
                 mdl1Col);
-        out.accept(model1Type + " trained on: " + getModelDevice(model1Type, true));
 
         // ── 3. Train Model 2 ───────────────────────────────────────────────
         updateStatus("Training " + model2Type + "…", 0.40);
@@ -673,7 +672,6 @@ public class DualModelClassifier {
                 mdl2Eta,
                 mdl2Sub,
                 mdl2Col);
-        out.accept(model2Type + " trained on: " + getModelDevice(model2Type, false));
 
         // ── 4. Predict all cells (chunked for large datasets) ────────────
         timer.start("predict all cells");
@@ -1181,17 +1179,6 @@ public class DualModelClassifier {
             case RANDOM_FOREST -> {
                 var rf = isModel1 ? rfModel1 : rfModel2;
                 yield rf != null && rf.isTrained();
-            }
-        };
-    }
-
-    private String getModelDevice(ModelType type, boolean isModel1) {
-        return switch (type) {
-            case XGBOOST -> xgbModel != null ? xgbModel.getLastDevice() : "unknown";
-            case LIGHTGBM -> lgbModel != null ? lgbModel.getLastDevice() : "unknown";
-            case RANDOM_FOREST -> {
-                var rf = isModel1 ? rfModel1 : rfModel2;
-                yield rf != null ? rf.getLastDevice() : "unknown";
             }
         };
     }

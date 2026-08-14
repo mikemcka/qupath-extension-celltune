@@ -301,7 +301,8 @@ public class ScatterPlotView {
             List<PathObject> cellList,
             PopulationSet predictions,
             Runnable openClassControl,
-            FeatureNormalizer normalizer) {
+            FeatureNormalizer normalizer,
+            Runnable onNewPlot) {
         this.qupath = qupath;
         this.imageName = imageName != null ? imageName : "Current Image";
         this.markerFeatures = List.copyOf(markerFeatures);
@@ -595,7 +596,19 @@ public class ScatterPlotView {
         projectControls.managedProperty().bind(projectControls.visibleProperty());
         projectControls.setVisible(false);
 
-        sampleControls = new HBox(8, new Label("Sample:"), sampleSpinner, reSampleBtn);
+        Button newBtn = new Button("New clustering session");
+        newBtn.setTooltip(
+                new javafx.scene.control.Tooltip(
+                        "Start a fresh clustering session — re-select measurements and re-cluster. Use this to change "
+                                + "the marker set or scope; reopening from the menu otherwise restores this window as it was."));
+        newBtn.setDisable(onNewPlot == null);
+        newBtn.setOnAction(e -> {
+            if (onNewPlot != null) {
+                onNewPlot.run();
+            }
+        });
+
+        sampleControls = new HBox(8, new Label("Sample:"), sampleSpinner, reSampleBtn, newBtn);
         sampleControls.setAlignment(Pos.CENTER_LEFT);
 
         progress = new ProgressIndicator();
@@ -886,6 +899,25 @@ public class ScatterPlotView {
     public void show() {
         stage.show();
         stage.toFront();
+    }
+
+    /** Hide the window. The instance (and its fit / clusters) stays reusable via {@link #show()}. */
+    public void close() {
+        stage.close();
+    }
+
+    /** The image this plot was built for — used to decide whether a retained window can be reused. */
+    public boolean isForImage(String name) {
+        return imageName != null && imageName.equals(name);
+    }
+
+    /**
+     * Whether a retained window can be reused for the image now open. A project-scope plot pools
+     * across many images, so it is independent of which single image is active and is always
+     * reusable; a current-image plot is only reusable for the same image it was built for.
+     */
+    public boolean isReusableFor(String name) {
+        return scope == Scope.PROJECT || isForImage(name);
     }
 
     // ── Embedding + clustering (background thread) ──────────────────────────────

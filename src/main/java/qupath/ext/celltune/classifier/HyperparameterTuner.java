@@ -25,8 +25,6 @@ import qupath.ext.celltune.util.TrainingThreads;
  * <p>
  * XGBoost and LightGBM are tuned independently — each model gets its own
  * set of optimal hyperparameters.
- * <p>
- * All training during tuning uses CPU to avoid GPU probe overhead.
  */
 public final class HyperparameterTuner {
 
