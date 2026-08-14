@@ -219,12 +219,19 @@ final class ClusterAssignmentPane {
         return l;
     }
 
-    /** Diverging colour: blue (low) → white (0) → red (high), scaled by maxAbs. */
+    // Perceptual stretch for the diverging ramp. maxAbs is pinned to the single largest |z| in the
+    // grid — usually one strong positive — so low/moderate z-scores (especially the blue side) map
+    // near white and wash out. Raising |t| to this exponent (<1) pushes those mid/low values away
+    // from white toward saturation while leaving 0 and the ±maxAbs endpoints fixed.
+    private static final double HEATMAP_GAMMA = 0.55;
+
+    /** Diverging colour: blue (low) → white (0) → red (high), scaled by maxAbs with a gamma stretch. */
     private static Color heatColor(double v, double maxAbs) {
         double t = maxAbs < 1e-9 ? 0 : Math.max(-1, Math.min(1, v / maxAbs));
-        if (t >= 0) {
-            return Color.color(1, 1 - t, 1 - t);
+        double s = Math.signum(t) * Math.pow(Math.abs(t), HEATMAP_GAMMA);
+        if (s >= 0) {
+            return Color.color(1, 1 - s, 1 - s);
         }
-        return Color.color(1 + t, 1 + t, 1);
+        return Color.color(1 + s, 1 + s, 1);
     }
 }
