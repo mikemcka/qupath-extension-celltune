@@ -61,7 +61,7 @@ class TunerParamParityTest {
     void xgboostParamsIncludeModelAffectingSettings() {
         Map<String, Object> p = XGBoostModel.buildParams(5, 6, 0.3f, 0.8f, 4);
         assertEquals("hist", p.get("tree_method"), "hist is what the benchmarks and timings assume");
-        assertEquals("cpu", p.get("device"), "this build ships no CUDA kernels");
+        assertEquals("cpu", p.get("device"), "CPU-only build");
         assertEquals(4, p.get("nthread"));
         assertEquals(5, p.get("num_class"));
         assertEquals("multi:softprob", p.get("objective"));

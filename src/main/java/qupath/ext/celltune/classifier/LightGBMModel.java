@@ -70,7 +70,6 @@ public class LightGBMModel {
     private int nClasses;
     private List<String> classNames;
     private List<String> featureNames;
-    private String lastDevice = "unknown";
 
     // ── Training ────────────────────────────────────────────────────────────────
 
@@ -119,12 +118,7 @@ public class LightGBMModel {
         String params = buildParams(nClasses, maxDepth, learningRate, subsample, colsample, TrainingThreads.total());
 
         // This build pins the CPU-only lightgbm4j artifact (see build.gradle.kts:
-        // "io.github.metarank:lightgbm4j"). No GPU kernels are shipped, so device_type=gpu can
-        // never succeed. The previous probe-and-fallback ran a *full* numRounds loop under GPU
-        // params on every train() call before failing — and if it failed part-way through, that
-        // work was discarded and CPU training restarted from round 0. Always train on CPU here.
-        // If/when a GPU artifact is wired in, restore the probe-and-fallback logic.
-        // (Same reasoning, same conclusion, as XGBoostModel.train.)
+        // "io.github.metarank:lightgbm4j").
         booster = LGBMBooster.create(dataset, params);
         for (int i = 0; i < numRounds; i++) {
             // Do NOT break on updateOneIter()'s return. It is LightGBM's is_finished, and the
@@ -137,7 +131,7 @@ public class LightGBMModel {
             booster.updateOneIter();
         }
         logger.info(
-                "LightGBM training: CPU — {} samples, {} features, {} classes, {} rounds",
+                "LightGBM training: {} samples, {} features, {} classes, {} rounds",
                 nSamples,
                 nFeatures,
                 nClasses,
@@ -145,13 +139,6 @@ public class LightGBMModel {
 
         // Close dataset — booster keeps its own copy
         dataset.close();
-
-        lastDevice = "CPU";
-    }
-
-    /** @return the device used for the last training run */
-    public String getLastDevice() {
-        return lastDevice;
     }
 
     // ── Early Stopping ──────────────────────────────────────────────────────────
