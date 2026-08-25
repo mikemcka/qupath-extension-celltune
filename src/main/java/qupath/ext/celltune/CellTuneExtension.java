@@ -747,6 +747,10 @@ public class CellTuneExtension implements QuPathExtension, BinaryClassifierManag
         AnalysisViews.showCellularNeighborhoods(qupath);
     }
 
+    void showBatchNormalization(QuPathGUI qupath) {
+        AnalysisViews.showBatchNormalization(qupath);
+    }
+
     // ── Placeholder actions (wired in later phases) ────────────────────────────
 
     /**

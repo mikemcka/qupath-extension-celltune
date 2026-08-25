@@ -270,6 +270,22 @@ final class AnalysisViews {
         new NeighborhoodAnalysisDialog(qupath).show();
     }
 
+    static void showBatchNormalization(QuPathGUI qupath) {
+        var project = qupath.getProject();
+        if (project == null) {
+            Dialogs.showErrorMessage(EXTENSION_NAME, "Open a project — batch normalisation aligns across images.");
+            return;
+        }
+        if (project.getImageList().size() < 2) {
+            Dialogs.showErrorMessage(
+                    EXTENSION_NAME,
+                    "Batch normalisation needs at least two images in the project (found "
+                            + project.getImageList().size() + ").");
+            return;
+        }
+        new qupath.ext.celltune.ui.BatchNormalizationDialog(qupath).show();
+    }
+
     /**
      * Open the cells-free <b>image pixel prescreen</b>: whole-image per-channel pixel
      * statistics read off a low-res pyramid level for every project image, contextualised

@@ -52,7 +52,11 @@ final class BatchNormPersistence {
         data.refGroupByMarker = new ArrayList<>(List.of(fit.refGroupByMarker()));
         String json = ProjectStateManager.GSON.toJson(data);
         Files.writeString(path, json, StandardCharsets.UTF_8);
-        logger.info("Saved batch shifts ({} markers, {} images) to {}", data.markers.size(), data.scaleByImage.size(), path);
+        logger.info(
+                "Saved batch shifts ({} markers, {} images) to {}",
+                data.markers.size(),
+                data.scaleByImage.size(),
+                path);
     }
 
     /** Load the persisted scales, or {@code null} if none / unreadable. */
