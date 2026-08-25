@@ -51,8 +51,24 @@ public final class NeighborhoodCohort {
 
     private NeighborhoodCohort() {}
 
-    /** Shared neighborhood-window parameters for both passes. */
-    public record Params(boolean knn, int k, double radius, boolean includeCenter, Double pixelOverride) {}
+    /**
+     * Shared neighborhood-window parameters for both passes.
+     *
+     * @param mode            how the window is defined (kNN / radius / Delaunay)
+     * @param k               window size for {@link NeighborhoodModel.WindowMode#KNN}
+     * @param radius          window radius for {@link NeighborhoodModel.WindowMode#RADIUS} (coordinate units)
+     * @param delaunayMaxEdge Delaunay edge-length cutoff (coordinate units); {@code NaN} = data-driven auto
+     *                        (Tukey upper whisker), {@code <= 0} = no pruning
+     * @param includeCenter   count the centre cell's own type in its window
+     * @param pixelOverride   µm/pixel override (nullable → use image calibration)
+     */
+    public record Params(
+            NeighborhoodModel.WindowMode mode,
+            int k,
+            double radius,
+            double delaunayMaxEdge,
+            boolean includeCenter,
+            Double pixelOverride) {}
 
     /** A bounded pool of raw composition rows for fitting. */
     public record SampleResult(double[][] rows, int sampled, int total, int imageCount) {}
@@ -516,9 +532,15 @@ public final class NeighborhoodCohort {
             typeId[i] = idx != null ? idx : -1;
         }
 
-        int[][] neighbors = params.knn()
-                ? NeighborhoodModel.kNearestNeighborIndices(xs, ys, params.k())
-                : NeighborhoodModel.radiusNeighborIndices(xs, ys, params.radius());
+        int[][] neighbors =
+                switch (params.mode()) {
+                    case KNN -> NeighborhoodModel.kNearestNeighborIndices(xs, ys, params.k());
+                    case RADIUS -> NeighborhoodModel.radiusNeighborIndices(xs, ys, params.radius());
+                    case DELAUNAY ->
+                        Double.isNaN(params.delaunayMaxEdge())
+                                ? NeighborhoodModel.delaunayNeighborIndicesAuto(xs, ys)
+                                : NeighborhoodModel.delaunayNeighborIndices(xs, ys, params.delaunayMaxEdge());
+                };
         double[][] comp = NeighborhoodModel.compositionMatrix(neighbors, typeId, nTypes, params.includeCenter());
         return new ImageComp(cells, comp);
     }

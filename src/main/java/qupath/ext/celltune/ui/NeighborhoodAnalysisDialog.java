@@ -37,6 +37,7 @@ import org.slf4j.LoggerFactory;
 import qupath.ext.celltune.model.NeighborhoodCohort;
 import qupath.ext.celltune.model.NeighborhoodModel;
 import qupath.ext.celltune.model.NeighborhoodModel.ClusterResult;
+import qupath.ext.celltune.model.NeighborhoodModel.WindowMode;
 import qupath.ext.celltune.model.ScatterMath;
 import qupath.fx.dialogs.Dialogs;
 import qupath.fx.dialogs.FileChoosers;
@@ -215,8 +216,15 @@ public class NeighborhoodAnalysisDialog {
     private final ToggleGroup modeGroup = new ToggleGroup();
     private final RadioButton knnRadio = new RadioButton("k nearest neighbours");
     private final RadioButton radiusRadio = new RadioButton("within radius");
+    private final RadioButton delaunayRadio = new RadioButton("Delaunay triangulation");
     private final Spinner<Integer> kSpinner = new Spinner<>();
     private final Spinner<Double> radiusSpinner = new Spinner<>();
+
+    // Delaunay edge-length cap: Auto (Tukey Q3+1.5·IQR per image) or a fixed distance.
+    private final ToggleGroup edgeCapGroup = new ToggleGroup();
+    private final RadioButton edgeFixedRadio = new RadioButton("max edge");
+    private final RadioButton edgeAutoRadio = new RadioButton("auto (Q3+1.5·IQR)");
+    private final Spinner<Double> delaunayEdgeSpinner = new Spinner<>();
     private final Spinner<Integer> cnSpinner = new Spinner<>();
     private final CheckBox includeCenterBox = new CheckBox("Include centre cell in its own window");
     private final CheckBox standardizeBox = new CheckBox("Standardize compositions before clustering");
@@ -308,6 +316,7 @@ public class NeighborhoodAnalysisDialog {
         // ── Neighborhood mode ──
         knnRadio.setToggleGroup(modeGroup);
         radiusRadio.setToggleGroup(modeGroup);
+        delaunayRadio.setToggleGroup(modeGroup);
         knnRadio.setSelected(true);
 
         kSpinner.setValueFactory(new SpinnerValueFactory.IntegerSpinnerValueFactory(2, 100, 10));
@@ -328,19 +337,41 @@ public class NeighborhoodAnalysisDialog {
         cnSpinner.setPrefWidth(90);
         cnSpinner.setTooltip(new Tooltip("Number of cellular neighborhoods to cluster into (paper default 10)."));
 
-        // Enable only the active mode's spinner.
+        // ── Delaunay edge cap (Fixed default 50, or data-driven Auto) ──
+        edgeFixedRadio.setToggleGroup(edgeCapGroup);
+        edgeAutoRadio.setToggleGroup(edgeCapGroup);
+        edgeFixedRadio.setSelected(true);
+        delaunayEdgeSpinner.setValueFactory(new SpinnerValueFactory.DoubleSpinnerValueFactory(1, 2000, 50, 5));
+        delaunayEdgeSpinner.setEditable(true);
+        delaunayEdgeSpinner.setPrefWidth(90);
+        delaunayEdgeSpinner.setTooltip(new Tooltip("Prune Delaunay edges longer than this (" + unit
+                + "). Sparse/border cells whose links all exceed it get no neighbourhood (CN = -1), "
+                + "avoiding spurious edges across tissue voids."));
+        edgeAutoRadio.setTooltip(new Tooltip("Cut off each image's edges at the Tukey upper whisker "
+                + "(Q3 + 1.5·IQR) of its own edge-length distribution — adapts to local cell density."));
+
+        // Enable only the active mode's controls.
         Runnable syncMode = () -> {
             boolean knn = knnRadio.isSelected();
+            boolean radius = radiusRadio.isSelected();
+            boolean delaunay = delaunayRadio.isSelected();
             kSpinner.setDisable(!knn);
-            radiusSpinner.setDisable(knn);
+            radiusSpinner.setDisable(!radius);
+            edgeFixedRadio.setDisable(!delaunay);
+            edgeAutoRadio.setDisable(!delaunay);
+            delaunayEdgeSpinner.setDisable(!delaunay || !edgeFixedRadio.isSelected());
         };
         modeGroup.selectedToggleProperty().addListener((o, a, b) -> syncMode.run());
+        edgeCapGroup.selectedToggleProperty().addListener((o, a, b) -> syncMode.run());
         syncMode.run();
 
         HBox knnRow = new HBox(8, knnRadio, new Label("window (cells) ="), kSpinner);
         knnRow.setAlignment(Pos.CENTER_LEFT);
         HBox radiusRow = new HBox(8, radiusRadio, new Label("radius (" + unit + ") ="), radiusSpinner);
         radiusRow.setAlignment(Pos.CENTER_LEFT);
+        HBox delaunayRow =
+                new HBox(8, delaunayRadio, edgeFixedRadio, delaunayEdgeSpinner, new Label(unit), edgeAutoRadio);
+        delaunayRow.setAlignment(Pos.CENTER_LEFT);
         HBox cnRow = new HBox(8, new Label("Number of CNs ="), cnSpinner);
         cnRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -501,6 +532,7 @@ public class NeighborhoodAnalysisDialog {
                 new Label("Neighborhood window:"),
                 knnRow,
                 radiusRow,
+                delaunayRow,
                 cnRow,
                 new Separator(),
                 typeButtons,
@@ -676,6 +708,7 @@ public class NeighborhoodAnalysisDialog {
         commitSpinner(kSpinner);
         commitSpinner(cnSpinner);
         commitDoubleSpinner(radiusSpinner);
+        commitDoubleSpinner(delaunayEdgeSpinner);
 
         // Selected types → index map.
         List<String> selectedTypes = new ArrayList<>();
@@ -689,8 +722,12 @@ public class NeighborhoodAnalysisDialog {
             return;
         }
 
-        final boolean knn = knnRadio.isSelected();
+        final WindowMode mode = knnRadio.isSelected()
+                ? WindowMode.KNN
+                : radiusRadio.isSelected() ? WindowMode.RADIUS : WindowMode.DELAUNAY;
         final double radius = radiusSpinner.getValue();
+        // Delaunay edge cap: NaN = data-driven auto; otherwise the fixed distance. Only used in DELAUNAY mode.
+        final double delaunayMaxEdge = edgeAutoRadio.isSelected() ? Double.NaN : delaunayEdgeSpinner.getValue();
         final int nCN = cnSpinner.getValue();
         final boolean includeCenter = includeCenterBox.isSelected();
         // The spinner is the total window size (cells). The model counts the centre
@@ -722,9 +759,10 @@ public class NeighborhoodAnalysisDialog {
             commitSpinner(sampleSpinner);
             commitSpinner(workersSpinner);
             runCohort(
-                    knn,
+                    mode,
                     k,
                     radius,
+                    delaunayMaxEdge,
                     nCN,
                     includeCenter,
                     standardize,
@@ -747,9 +785,10 @@ public class NeighborhoodAnalysisDialog {
                     try {
                         runPipeline(
                                 imageData,
-                                knn,
+                                mode,
                                 k,
                                 radius,
+                                delaunayMaxEdge,
                                 nCN,
                                 includeCenter,
                                 standardize,
@@ -775,9 +814,10 @@ public class NeighborhoodAnalysisDialog {
     // ── Project-wide (cohort) CN ────────────────────────────────────────────────
 
     private void runCohort(
-            boolean knn,
+            WindowMode mode,
             int k,
             double radius,
+            double delaunayMaxEdge,
             int nCN,
             boolean includeCenter,
             boolean standardize,
@@ -806,7 +846,7 @@ public class NeighborhoodAnalysisDialog {
         final ImageData<BufferedImage> openDataF = openData;
         final List<ProjectImageEntry<BufferedImage>> entriesF = entries;
         final List<String> typeNames = new ArrayList<>(selectedTypes);
-        var params = new NeighborhoodCohort.Params(knn, k, radius, includeCenter, pxSize);
+        var params = new NeighborhoodCohort.Params(mode, k, radius, delaunayMaxEdge, includeCenter, pxSize);
 
         runBtn.setDisable(true);
         progressBar.setProgress(ProgressBar.INDETERMINATE_PROGRESS);
@@ -909,9 +949,10 @@ public class NeighborhoodAnalysisDialog {
 
     private void runPipeline(
             qupath.lib.images.ImageData<?> imageData,
-            boolean knn,
+            WindowMode mode,
             int k,
             double radius,
+            double delaunayMaxEdge,
             int nCN,
             boolean includeCenter,
             boolean standardize,
@@ -958,15 +999,23 @@ public class NeighborhoodAnalysisDialog {
             typeId[i] = idx != null ? idx : -1;
         }
 
-        log(String.format(
-                Locale.US,
-                "Building windows for %,d cells (%s, %s)…",
-                n,
-                knn ? "kNN window=" + (includeCenter ? k + 1 : k) : "radius=" + radius + unit,
-                "types=" + nTypes));
-        int[][] neighbors = knn
-                ? NeighborhoodModel.kNearestNeighborIndices(xs, ys, k)
-                : NeighborhoodModel.radiusNeighborIndices(xs, ys, radius);
+        String windowDesc =
+                switch (mode) {
+                    case KNN -> "kNN window=" + (includeCenter ? k + 1 : k);
+                    case RADIUS -> "radius=" + radius + unit;
+                    case DELAUNAY ->
+                        "delaunay maxEdge=" + (Double.isNaN(delaunayMaxEdge) ? "auto" : delaunayMaxEdge + unit);
+                };
+        log(String.format(Locale.US, "Building windows for %,d cells (%s, %s)…", n, windowDesc, "types=" + nTypes));
+        int[][] neighbors =
+                switch (mode) {
+                    case KNN -> NeighborhoodModel.kNearestNeighborIndices(xs, ys, k);
+                    case RADIUS -> NeighborhoodModel.radiusNeighborIndices(xs, ys, radius);
+                    case DELAUNAY ->
+                        Double.isNaN(delaunayMaxEdge)
+                                ? NeighborhoodModel.delaunayNeighborIndicesAuto(xs, ys)
+                                : NeighborhoodModel.delaunayNeighborIndices(xs, ys, delaunayMaxEdge);
+                };
 
         double[][] comp = NeighborhoodModel.compositionMatrix(neighbors, typeId, nTypes, includeCenter);
 
