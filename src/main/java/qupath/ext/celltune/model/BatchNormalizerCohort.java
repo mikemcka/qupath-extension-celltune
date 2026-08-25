@@ -6,7 +6,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -25,9 +24,11 @@ import qupath.lib.projects.ProjectImageEntry;
  * Headless, memory-safe backend for the project-wide <b>UniFORM batch-normalization</b>
  * FIT — the cohort analogue of the pure {@link BatchNormalizerModel} math. It streams
  * every selected image once (one worker per image), sub-samples cells, reads the selected
- * marker measurements, and learns a per-{@code (image, marker)} multiplicative
- * {@code scale} that aligns each image's (or batch's) intensity distribution to an
- * auto-chosen reference.
+ * intensity measurements, and learns one multiplicative <b>per-{@code (image, channel)}
+ * gain</b> — fit on a robust anchor stat (Cell: Mean) and applied to every selected stat of
+ * that channel — aligning each image's (or batch's) intensity distribution to an auto-chosen
+ * reference. Every intensity statistic of a channel (Mean/Median/percentiles/Std/erosion/
+ * expansion/environment) scales by the same gain, so this keeps them mutually consistent.
  *
  * <p>Mirrors {@code NeighborhoodCohort}'s streaming/parallel idioms (multi-project
  * {@code List<ProjectImageEntry>}, per-image workers via {@link BackgroundExecutors},
@@ -198,59 +199,74 @@ public final class BatchNormalizerCohort {
         }
         byImage.clear(); // release raw values
 
-        // ── Per-group histograms (sum member images) ──
-        // groupHist: group → [marker][bin]
-        Map<String, long[][]> groupHist = new TreeMap<>();
-        for (Map.Entry<String, long[][]> e : histByImage.entrySet()) {
-            String g = groupOf.get(e.getKey());
-            long[][] acc = groupHist.computeIfAbsent(g, k -> new long[nMarkers][nBins]);
-            long[][] ih = e.getValue();
-            for (int m = 0; m < nMarkers; m++) {
+        // ── Per-channel gain: ONE scale per (image, channel), fit on an anchor stat ──
+        // A batch effect is a multiplicative gain per channel; every intensity stat of that
+        // channel (Mean/Median/percentiles/Std/erosion/expansion/environment) scales by the
+        // same factor. So we group selected measurements by channel (token before the first
+        // ": "), fit the gain on a robust anchor (Cell: Mean if selected, else Cell: Median,
+        // else the first stat), and apply that one scale to every selected stat of the channel.
+        String[] channelOf = new String[nMarkers];
+        Map<String, List<Integer>> byChannel = new LinkedHashMap<>();
+        for (int m = 0; m < nMarkers; m++) {
+            channelOf[m] = channelOf(markers.get(m));
+            byChannel.computeIfAbsent(channelOf[m], k -> new ArrayList<>()).add(m);
+        }
+        List<String> groups = new ArrayList<>(new TreeSet<>(groupOf.values()));
+        Map<String, Integer> groupIndex = new LinkedHashMap<>();
+        for (int i = 0; i < groups.size(); i++) {
+            groupIndex.put(groups.get(i), i);
+        }
+
+        Map<String, String> refGroupByChannel = new LinkedHashMap<>();
+        Map<String, double[]> channelGroupScale = new LinkedHashMap<>(); // channel → per-group scale
+        for (Map.Entry<String, List<Integer>> e : byChannel.entrySet()) {
+            int a = pickAnchor(e.getValue(), markers);
+            long[][] anchorGroupHist = new long[groups.size()][nBins];
+            for (Map.Entry<String, long[][]> he : histByImage.entrySet()) {
+                long[] ah = he.getValue()[a];
+                long[] acc = anchorGroupHist[groupIndex.get(groupOf.get(he.getKey()))];
                 for (int b = 0; b < nBins; b++) {
-                    acc[m][b] += ih[m][b];
+                    acc[b] += ah[b];
                 }
             }
+            int refIdx = referenceIndex(groups, anchorGroupHist, params.referenceOverride());
+            refGroupByChannel.put(
+                    e.getKey(), refIdx >= 0 ? groups.get(refIdx) : (groups.isEmpty() ? null : groups.get(0)));
+            long[] ref = anchorGroupHist[Math.max(0, refIdx)];
+            double[] gScale = new double[groups.size()];
+            for (int i = 0; i < groups.size(); i++) {
+                int shift = BatchNormalizerModel.crossCorrelationShift(anchorGroupHist[i], ref);
+                gScale[i] = BatchNormalizerModel.shiftToScale(shift, logMin[a], logMax[a], nBins);
+            }
+            channelGroupScale.put(e.getKey(), gScale);
         }
-        List<String> groups = new ArrayList<>(new TreeSet<>(groupHist.keySet()));
 
-        // ── Per-marker reference group + per-group shift ──
+        // ── Map each image → per-measurement scale (its channel's) + a QC bin shift ──
         String[] refGroupByMarker = new String[nMarkers];
-        // shift for (group, marker)
-        Map<String, int[]> shiftByGroup = new LinkedHashMap<>();
-        for (String g : groups) {
-            shiftByGroup.put(g, new int[nMarkers]);
-        }
         for (int m = 0; m < nMarkers; m++) {
-            long[][] perGroup = new long[groups.size()][];
-            for (int gi = 0; gi < groups.size(); gi++) {
-                perGroup[gi] = groupHist.get(groups.get(gi))[m];
-            }
-            int refIdx = referenceIndex(groups, perGroup, params.referenceOverride());
-            refGroupByMarker[m] = refIdx >= 0 ? groups.get(refIdx) : (groups.isEmpty() ? null : groups.get(0));
-            long[] ref = perGroup[Math.max(0, refIdx)];
-            for (int gi = 0; gi < groups.size(); gi++) {
-                shiftByGroup.get(groups.get(gi))[m] = BatchNormalizerModel.crossCorrelationShift(perGroup[gi], ref);
-            }
+            refGroupByMarker[m] = refGroupByChannel.get(channelOf[m]);
         }
-
-        // ── Map each image to its group's shift/scale ──
         Map<String, int[]> shiftByImage = new LinkedHashMap<>();
         Map<String, double[]> scaleByImage = new LinkedHashMap<>();
         for (String image : histByImage.keySet()) {
-            int[] gshift = shiftByGroup.get(groupOf.get(image));
+            int gi = groupIndex.get(groupOf.get(image));
             int[] shift = new int[nMarkers];
             double[] scale = new double[nMarkers];
             for (int m = 0; m < nMarkers; m++) {
-                shift[m] = gshift[m];
-                scale[m] = BatchNormalizerModel.shiftToScale(shift[m], logMin[m], logMax[m], nBins);
+                double s = channelGroupScale.get(channelOf[m])[gi];
+                scale[m] = s;
+                // QC "after" shift, expressed in THIS measurement's own histogram bins so a
+                // channel gain renders correctly on stats with different intensity ranges.
+                double binWidth = nBins > 1 && logMax[m] > logMin[m] ? (logMax[m] - logMin[m]) / (nBins - 1) : 0.0;
+                shift[m] = (binWidth > 0 && s > 0) ? (int) Math.round(-Math.log(s) / binWidth) : 0;
             }
             shiftByImage.put(image, shift);
             scaleByImage.put(image, scale);
         }
 
         log.accept(String.format(
-                "Fitted %d marker(s) over %d image(s) in %d group(s) (%s).",
-                nMarkers, histByImage.size(), groups.size(), params.mode()));
+                "Fitted %d channel gain(s) over %d measurement(s), %d image(s), %d group(s) (%s).",
+                byChannel.size(), nMarkers, histByImage.size(), groups.size(), params.mode()));
         return new NormalizerFit(
                 new ArrayList<>(markers),
                 scaleByImage,
@@ -309,6 +325,27 @@ public final class BatchNormalizerCohort {
         String batch = params.imageToBatch().getOrDefault(name, "(unassigned)");
         log.accept(String.format("[%s] sampled %,d of %,d cells [batch=%s]", name, take, cells.size(), batch));
         return new ImageValues(name, batch, values, cells.size());
+    }
+
+    /** Channel token of a measurement name: the part before the first {@code ": "} (or the whole name). */
+    static String channelOf(String feature) {
+        int i = feature.indexOf(": ");
+        return i > 0 ? feature.substring(0, i) : feature;
+    }
+
+    /** Anchor stat for a channel's gain fit: prefer {@code Cell: Mean}, then {@code Cell: Median}, else the first. */
+    private static int pickAnchor(List<Integer> indices, List<String> markers) {
+        int median = -1;
+        for (int i : indices) {
+            String n = markers.get(i);
+            if (n.endsWith(": Cell: Mean")) {
+                return i;
+            }
+            if (median < 0 && n.endsWith(": Cell: Median")) {
+                median = i;
+            }
+        }
+        return median >= 0 ? median : indices.get(0);
     }
 
     /** Reference group index: the override's index if supplied and present, else auto (L2-closest-to-mean). */
