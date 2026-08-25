@@ -119,6 +119,147 @@ class NeighborhoodModelTest {
         }
     }
 
+    // ── Delaunay ─────────────────────────────────────────────────────────────────
+
+    @Test
+    void delaunaySquareHasFourSidesAndOneDiagonal() {
+        // Unit square: Delaunay = the 4 sides + exactly one of the two (degenerate) diagonals.
+        double[] xs = {0.0, 1.0, 1.0, 0.0};
+        double[] ys = {0.0, 0.0, 1.0, 1.0};
+        int[][] adj = NeighborhoodModel.delaunayNeighborIndices(xs, ys, Double.POSITIVE_INFINITY);
+        assertSymmetricAndSelfExcluded(adj);
+        // The four sides are always present regardless of which diagonal is chosen.
+        assertTrue(toSet(adj[0]).contains(1) && toSet(adj[0]).contains(3), "corner 0 sides");
+        assertTrue(toSet(adj[1]).contains(0) && toSet(adj[1]).contains(2), "corner 1 sides");
+        assertTrue(toSet(adj[2]).contains(1) && toSet(adj[2]).contains(3), "corner 2 sides");
+        assertTrue(toSet(adj[3]).contains(2) && toSet(adj[3]).contains(0), "corner 3 sides");
+        assertEquals(5, undirectedEdgeCount(adj), "4 sides + 1 diagonal");
+    }
+
+    @Test
+    void delaunayNearestNeighbourIsAlwaysAnEdge() {
+        // A well-known Delaunay property: each point's single nearest neighbour is a
+        // Delaunay neighbour. Cheap, strong correctness check without a reference triangulator.
+        Random rng = new Random(19);
+        int n = 150;
+        double[] xs = new double[n];
+        double[] ys = new double[n];
+        for (int i = 0; i < n; i++) {
+            xs[i] = rng.nextDouble() * 1000.0;
+            ys[i] = rng.nextDouble() * 1000.0;
+        }
+        int[][] adj = NeighborhoodModel.delaunayNeighborIndices(xs, ys, Double.POSITIVE_INFINITY);
+        assertSymmetricAndSelfExcluded(adj);
+        for (int i = 0; i < n; i++) {
+            int nn = -1;
+            double best = Double.POSITIVE_INFINITY;
+            for (int j = 0; j < n; j++) {
+                if (j == i) {
+                    continue;
+                }
+                double dx = xs[i] - xs[j];
+                double dy = ys[i] - ys[j];
+                double d2 = dx * dx + dy * dy;
+                if (d2 < best) {
+                    best = d2;
+                    nn = j;
+                }
+            }
+            assertTrue(toSet(adj[i]).contains(nn), "nearest neighbour of " + i + " must be a Delaunay edge");
+        }
+    }
+
+    @Test
+    void delaunayFixedPruneIsolatesFarOutlier() {
+        // A tight cluster plus one point far beyond the cutoff: the outlier's edges are
+        // all pruned (empty window → CN = -1 downstream) while the cluster stays connected.
+        double[] xs = {0.0, 1.0, 0.0, 1.0, 0.5, 500.0};
+        double[] ys = {0.0, 0.0, 1.0, 1.0, 0.5, 500.0};
+        int[][] adj = NeighborhoodModel.delaunayNeighborIndices(xs, ys, 5.0);
+        assertSymmetricAndSelfExcluded(adj);
+        assertEquals(0, adj[5].length, "far outlier must have no neighbours after pruning");
+        for (int i = 0; i < 5; i++) {
+            assertFalse(toSet(adj[i]).contains(5), "no cluster cell links to the outlier");
+            assertTrue(adj[i].length > 0, "cluster cell " + i + " keeps its short edges");
+        }
+    }
+
+    @Test
+    void delaunayAutoPrunesLongBorderEdge() {
+        // 3x3 grid (spacing 10) + one distant point. The auto (Q3+1.5·IQR) cutoff is set
+        // by the grid's ~10–14 unit edges, so the ~hundreds-of-units links to the outlier
+        // are pruned automatically, isolating it.
+        int gi = 0;
+        double[] xs = new double[10];
+        double[] ys = new double[10];
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) {
+                xs[gi] = c * 10.0;
+                ys[gi] = r * 10.0;
+                gi++;
+            }
+        }
+        xs[9] = 400.0;
+        ys[9] = 400.0;
+        int[][] adj = NeighborhoodModel.delaunayNeighborIndicesAuto(xs, ys);
+        assertSymmetricAndSelfExcluded(adj);
+        assertEquals(0, adj[9].length, "distant point pruned by the auto whisker");
+        for (int i = 0; i < 9; i++) {
+            assertTrue(adj[i].length > 0, "grid cell " + i + " keeps neighbours");
+            assertFalse(toSet(adj[i]).contains(9), "no grid cell links across the void");
+        }
+    }
+
+    @Test
+    void delaunayNanCoordinatesAreEmptyAndIgnored() {
+        double[] xs = {0.0, 1.0, Double.NaN, 0.0};
+        double[] ys = {0.0, 0.0, Double.NaN, 1.0};
+        int[][] adj = NeighborhoodModel.delaunayNeighborIndices(xs, ys, Double.POSITIVE_INFINITY);
+        assertEquals(0, adj[2].length, "NaN-coord point has no window");
+        for (int i = 0; i < 4; i++) {
+            assertFalse(toSet(adj[i]).contains(2), "NaN point is not a neighbour of anyone");
+        }
+        assertSymmetricAndSelfExcluded(adj);
+    }
+
+    @Test
+    void delaunayDuplicateCoordinatesConnect() {
+        // Two coincident cells (0 and 1) collapse to one JTS vertex; both must still connect
+        // to each other and share the triangulation neighbours of that vertex.
+        double[] xs = {5.0, 5.0, 0.0, 10.0, 5.0};
+        double[] ys = {5.0, 5.0, 0.0, 0.0, 12.0};
+        int[][] adj = NeighborhoodModel.delaunayNeighborIndices(xs, ys, Double.POSITIVE_INFINITY);
+        assertSymmetricAndSelfExcluded(adj);
+        assertTrue(toSet(adj[0]).contains(1), "coincident twins must connect to each other");
+        assertTrue(toSet(adj[1]).contains(0));
+        // Whatever the shared vertex links to, both twins carry it identically.
+        Set<Integer> a0 = toSet(adj[0]);
+        Set<Integer> a1 = toSet(adj[1]);
+        a0.remove(1);
+        a1.remove(0);
+        assertEquals(a0, a1, "twins share the same external neighbours");
+    }
+
+    @Test
+    void delaunayNonPositiveMaxEdgeMeansNoPruning() {
+        double[] xs = {0.0, 1.0, 1.0, 0.0};
+        double[] ys = {0.0, 0.0, 1.0, 1.0};
+        int[][] pruned = NeighborhoodModel.delaunayNeighborIndices(xs, ys, 0.0);
+        int[][] raw = NeighborhoodModel.delaunayNeighborIndices(xs, ys, Double.POSITIVE_INFINITY);
+        assertEquals(undirectedEdgeCount(raw), undirectedEdgeCount(pruned), "maxEdge<=0 must not prune");
+    }
+
+    @Test
+    void tukeyUpperWhiskerMatchesFivenumFence() {
+        // fivenum(1..9) hinges = Q1=3, Q3=7 → IQR=4 → fence = 7 + 1.5*4 = 13.
+        double[] vals = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+        assertEquals(13.0, NeighborhoodModel.tukeyUpperWhisker(vals), EPS);
+        // Non-finite entries are ignored; empty → NaN (callers treat as "no prune").
+        assertTrue(Double.isNaN(NeighborhoodModel.tukeyUpperWhisker(new double[] {Double.NaN})));
+        assertEquals(
+                13.0, NeighborhoodModel.tukeyUpperWhisker(new double[] {1, 2, 3, 4, 5, 6, 7, 8, 9, Double.NaN}), EPS);
+    }
+
     // ── composition ─────────────────────────────────────────────────────────────
 
     @Test
@@ -318,6 +459,28 @@ class NeighborhoodModelTest {
             set.add(order[t]);
         }
         return set;
+    }
+
+    private static void assertSymmetricAndSelfExcluded(int[][] adj) {
+        for (int i = 0; i < adj.length; i++) {
+            for (int j : adj[i]) {
+                assertFalse(j == i, "self edge at " + i);
+                assertTrue(toSet(adj[j]).contains(i), "asymmetric edge " + i + "-" + j);
+            }
+        }
+    }
+
+    /** Distinct undirected edges (counts each {i,j} once, tolerant of repeated list entries). */
+    private static int undirectedEdgeCount(int[][] adj) {
+        int count = 0;
+        for (int i = 0; i < adj.length; i++) {
+            for (int j : toSet(adj[i])) {
+                if (j > i) {
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     private static Set<Integer> toSet(int[] a) {

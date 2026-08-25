@@ -1,12 +1,19 @@
 package qupath.ext.celltune.model;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
+import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.Envelope;
+import org.locationtech.jts.geom.Geometry;
+import org.locationtech.jts.geom.GeometryFactory;
+import org.locationtech.jts.geom.LineString;
 import org.locationtech.jts.index.strtree.ItemBoundable;
 import org.locationtech.jts.index.strtree.ItemDistance;
 import org.locationtech.jts.index.strtree.STRtree;
+import org.locationtech.jts.triangulate.DelaunayTriangulationBuilder;
 import smile.clustering.KMeans;
 import smile.math.MathEx;
 
@@ -25,6 +32,28 @@ import smile.math.MathEx;
 public final class NeighborhoodModel {
 
     private NeighborhoodModel() {}
+
+    /** Shared {@link GeometryFactory} for the Delaunay builder — stateless, so a single instance is safe. */
+    private static final GeometryFactory GEOM_FACTORY = new GeometryFactory();
+
+    /**
+     * How a cell's spatial neighbourhood ("window") is defined before its cell-type
+     * composition is computed. All three feed the identical downstream
+     * composition → k-means → diversity/adjacency pipeline; they differ only in which
+     * cells count as neighbours.
+     *
+     * <ul>
+     *   <li>{@link #KNN} — the {@code k} nearest cells (paper default, density-adaptive).</li>
+     *   <li>{@link #RADIUS} — every cell within a fixed radius.</li>
+     *   <li>{@link #DELAUNAY} — cells joined by a Delaunay triangulation edge, optionally
+     *       pruned by a maximum edge length so sparse/border cells are not linked across voids.</li>
+     * </ul>
+     */
+    public enum WindowMode {
+        KNN,
+        RADIUS,
+        DELAUNAY
+    }
 
     // ── Neighbor finding ─────────────────────────────────────────────────────
 
@@ -203,6 +232,198 @@ public final class NeighborhoodModel {
             out[i] = arr;
         }
         return out;
+    }
+
+    // ── Delaunay neighbours ──────────────────────────────────────────────────
+
+    /**
+     * For every point, the indices of the points joined to it by an edge of the
+     * Delaunay triangulation of the (x, y) cloud, self-excluded and symmetric. An
+     * edge is kept only if its Euclidean length is {@code <= maxEdge}; pass
+     * {@code maxEdge <= 0} or a non-finite value for no pruning (raw Delaunay).
+     * Pruning lets sparse/border cells drop to an empty window (→ {@code CN = -1})
+     * instead of being linked across large voids at the tissue edge — the standard
+     * fix for Delaunay's long boundary edges (cf. imcRtools {@code max_dist},
+     * Giotto {@code maximum_distance_delaunay}). See {@link #delaunayNeighborIndicesAuto}
+     * for the data-driven cutoff.
+     *
+     * <p>NaN-coordinate points get an empty list and are ignored as neighbours of
+     * others. Coincident points (which JTS merges into a single triangulation
+     * vertex) are all connected to that vertex's neighbours and to each other, so no
+     * cell is silently dropped for sharing a centroid.
+     */
+    public static int[][] delaunayNeighborIndices(double[] xs, double[] ys, double maxEdge) {
+        if (xs.length != ys.length) {
+            throw new IllegalArgumentException("xs and ys must have the same length");
+        }
+        return buildAdjacency(xs.length, computeDelaunayEdges(xs, ys), maxEdge);
+    }
+
+    /**
+     * Delaunay neighbours pruned at a <b>data-driven</b> maximum edge length: the
+     * Tukey upper whisker {@code Q3 + 1.5·IQR} of the triangulation's own edge-length
+     * distribution ({@link #tukeyUpperWhisker}). This adapts the cutoff per image to
+     * local cell density — the default {@code "auto"} behaviour of Giotto's Delaunay
+     * network — clipping the long-tail border edges while keeping true adjacencies.
+     * Triangulates once (the whisker and the pruning share the same edges). Falls back
+     * to no pruning when there are too few edges to form a distribution.
+     */
+    public static int[][] delaunayNeighborIndicesAuto(double[] xs, double[] ys) {
+        if (xs.length != ys.length) {
+            throw new IllegalArgumentException("xs and ys must have the same length");
+        }
+        DelaunayEdges de = computeDelaunayEdges(xs, ys);
+        double thr = tukeyUpperWhisker(de.lengths());
+        return buildAdjacency(xs.length, de, thr);
+    }
+
+    /** Undirected Delaunay edges (index pairs) and their Euclidean lengths. */
+    private record DelaunayEdges(int[][] pairs, double[] lengths) {}
+
+    /**
+     * Triangulate the finite points and return every undirected Delaunay edge as an
+     * index pair with its length. Coincident points share one JTS vertex; each pair
+     * of them is emitted as a zero-length edge so they connect regardless of pruning.
+     */
+    private static DelaunayEdges computeDelaunayEdges(double[] xs, double[] ys) {
+        int n = xs.length;
+        Map<Coordinate, List<Integer>> byCoord = new HashMap<>(n * 2);
+        List<Coordinate> sites = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            if (Double.isNaN(xs[i]) || Double.isNaN(ys[i])) {
+                continue;
+            }
+            Coordinate c = new Coordinate(xs[i], ys[i]);
+            List<Integer> lst = byCoord.get(c);
+            if (lst == null) {
+                lst = new ArrayList<>(1);
+                byCoord.put(c, lst);
+                sites.add(c);
+            }
+            lst.add(i);
+        }
+
+        List<int[]> pairs = new ArrayList<>();
+        List<Double> lens = new ArrayList<>();
+
+        // Coincident cells (same centroid) → mutual zero-length edges.
+        for (List<Integer> lst : byCoord.values()) {
+            for (int a = 0; a < lst.size(); a++) {
+                for (int b = a + 1; b < lst.size(); b++) {
+                    pairs.add(new int[] {lst.get(a), lst.get(b)});
+                    lens.add(0.0);
+                }
+            }
+        }
+
+        int nSites = sites.size();
+        if (nSites == 2) {
+            // Two distinct sites: JTS forms no triangle, but they are trivially adjacent.
+            List<Integer> la = byCoord.get(sites.get(0));
+            List<Integer> lb = byCoord.get(sites.get(1));
+            double len = sites.get(0).distance(sites.get(1));
+            for (int ia : la) {
+                for (int ib : lb) {
+                    pairs.add(new int[] {ia, ib});
+                    lens.add(len);
+                }
+            }
+        } else if (nSites >= 3) {
+            DelaunayTriangulationBuilder builder = new DelaunayTriangulationBuilder();
+            builder.setTolerance(0.0); // no coordinate snapping, so endpoints map back exactly
+            builder.setSites(sites);
+            Geometry edges = builder.getEdges(GEOM_FACTORY);
+            int ng = edges.getNumGeometries();
+            for (int g = 0; g < ng; g++) {
+                LineString ls = (LineString) edges.getGeometryN(g);
+                Coordinate c0 = ls.getCoordinateN(0);
+                Coordinate c1 = ls.getCoordinateN(1);
+                List<Integer> la = byCoord.get(c0);
+                List<Integer> lb = byCoord.get(c1);
+                if (la == null || lb == null) {
+                    continue;
+                }
+                double len = c0.distance(c1);
+                for (int ia : la) {
+                    for (int ib : lb) {
+                        pairs.add(new int[] {ia, ib});
+                        lens.add(len);
+                    }
+                }
+            }
+        }
+
+        int[][] pairArr = pairs.toArray(new int[0][]);
+        double[] lenArr = new double[lens.size()];
+        for (int e = 0; e < lenArr.length; e++) {
+            lenArr[e] = lens.get(e);
+        }
+        return new DelaunayEdges(pairArr, lenArr);
+    }
+
+    /** Build the symmetric adjacency lists from edges, keeping only those with length {@code <= maxEdge}. */
+    private static int[][] buildAdjacency(int n, DelaunayEdges de, double maxEdge) {
+        double cap = (Double.isNaN(maxEdge) || maxEdge <= 0) ? Double.POSITIVE_INFINITY : maxEdge;
+        List<List<Integer>> adj = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            adj.add(new ArrayList<>());
+        }
+        int[][] pairs = de.pairs();
+        double[] lengths = de.lengths();
+        for (int e = 0; e < pairs.length; e++) {
+            if (lengths[e] <= cap) {
+                int i = pairs[e][0];
+                int j = pairs[e][1];
+                adj.get(i).add(j);
+                adj.get(j).add(i);
+            }
+        }
+        int[][] out = new int[n][];
+        for (int i = 0; i < n; i++) {
+            List<Integer> lst = adj.get(i);
+            int[] arr = new int[lst.size()];
+            for (int t = 0; t < arr.length; t++) {
+                arr[t] = lst.get(t);
+            }
+            out[i] = arr;
+        }
+        return out;
+    }
+
+    /**
+     * Tukey upper whisker {@code Q3 + 1.5·(Q3 - Q1)} of {@code values}, where Q1/Q3
+     * are the lower/upper hinges from R's {@code fivenum} (the convention behind
+     * {@code grDevices::boxplot.stats}, which Giotto's {@code "auto"} Delaunay cutoff
+     * uses). Non-finite entries are ignored. Returns {@code NaN} when no finite value
+     * remains, which callers treat as "do not prune". Using the whisker value directly
+     * as the keep-threshold yields adjacency identical to boxplot.stats' "largest
+     * datum within the whisker" convention, since any edge above the whisker exceeds
+     * {@code Q3 + 1.5·IQR} too.
+     */
+    public static double tukeyUpperWhisker(double[] values) {
+        double[] sorted = new double[values.length];
+        int m = 0;
+        for (double v : values) {
+            if (!Double.isNaN(v) && !Double.isInfinite(v)) {
+                sorted[m++] = v;
+            }
+        }
+        if (m == 0) {
+            return Double.NaN;
+        }
+        double[] x = java.util.Arrays.copyOf(sorted, m);
+        java.util.Arrays.sort(x);
+        double n4 = Math.floor((m + 3) / 2.0) / 2.0;
+        double q1 = hinge(x, n4);
+        double q3 = hinge(x, m + 1 - n4);
+        return q3 + 1.5 * (q3 - q1);
+    }
+
+    /** R {@code fivenum}-style interpolated order statistic at 1-based position {@code d}. */
+    private static double hinge(double[] sorted, double d) {
+        int lo = (int) Math.floor(d);
+        int hi = (int) Math.ceil(d);
+        return 0.5 * (sorted[lo - 1] + sorted[hi - 1]);
     }
 
     // ── Composition ──────────────────────────────────────────────────────────
