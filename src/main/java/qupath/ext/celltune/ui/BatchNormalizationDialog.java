@@ -2,7 +2,6 @@ package qupath.ext.celltune.ui;
 
 import java.awt.image.BufferedImage;
 import java.io.File;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,7 +22,6 @@ import javafx.scene.control.Separator;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.SpinnerValueFactory;
 import javafx.scene.control.TextArea;
-import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.HBox;
@@ -80,12 +78,9 @@ public class BatchNormalizationDialog {
     private final Label extraProjectsLabel = new Label();
 
     // Batch grouping.
-    private final ToggleGroup batchModeGroup = new ToggleGroup();
-    private final RadioButton batchFromNameRadio = new RadioButton("From image name (regex)");
-    private final RadioButton batchFromCsvRadio = new RadioButton("From CSV");
-    private final TextField batchRegexField = new TextField("(?i)batch\\s*\\d+");
-    private Map<String, String> csvBatchMap = new LinkedHashMap<>();
-    private final Label csvLabel = new Label("(no CSV loaded)");
+    // Manual image → batch assignment (edited via BatchAssignmentPane; auto-detected on first build).
+    private Map<String, String> manualBatch = new LinkedHashMap<>();
+    private final Label batchSummaryLabel = new Label();
 
     // Granularity.
     private final ToggleGroup granularityGroup = new ToggleGroup();
@@ -123,7 +118,11 @@ public class BatchNormalizationDialog {
     private Stage buildStage() {
         // Discover measurement names + default (marker means) from the open image.
         allFeatureNames = discoverFeatureNames();
+        // Default = true marker means only. Embeddings measured as channel means (e.g.
+        // "kronos_emb_0: Cell: Mean") end in ": Cell: Mean" too, so filter them out here —
+        // the correction is invalid for embedding dimensions.
         List<String> markerMeans = new ArrayList<>(IntensityHeatmap.discoverMarkerFeatures(allFeatureNames));
+        markerMeans.removeIf(FeatureSelectionPane::isEmbedding);
         selectedMeasurements = new ArrayList<>(markerMeans);
         updateMeasurementsLabel();
         Button chooseMeasBtn = new Button("Choose measurements…");
@@ -161,23 +160,15 @@ public class BatchNormalizationDialog {
                 new HBox(8, new Label("Also include projects:"), addProjectBtn, clearProjectsBtn),
                 extraProjectsLabel);
 
-        // Batch grouping.
-        batchFromNameRadio.setToggleGroup(batchModeGroup);
-        batchFromCsvRadio.setToggleGroup(batchModeGroup);
-        batchFromNameRadio.setSelected(true);
-        batchRegexField.setPrefColumnCount(16);
-        batchRegexField.setTooltip(new Tooltip(
-                "The first match of this pattern in each image name is its batch label (e.g. \"batch1\")."));
-        Button previewBtn = new Button("Preview groups");
-        previewBtn.setOnAction(e -> previewGroups());
-        Button loadCsvBtn = new Button("Load CSV…");
-        loadCsvBtn.setOnAction(e -> loadBatchCsv());
-        HBox regexRow = new HBox(8, batchFromNameRadio, new Label("pattern:"), batchRegexField, previewBtn);
-        regexRow.setAlignment(Pos.CENTER_LEFT);
-        HBox csvRow = new HBox(8, batchFromCsvRadio, loadCsvBtn, csvLabel);
-        csvRow.setAlignment(Pos.CENTER_LEFT);
-        csvLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #666;");
-        VBox batchBox = new VBox(6, new Label("Batch grouping:"), regexRow, csvRow);
+        // Batch grouping — assign images to batches via a table editor (auto-detected as a starting point).
+        autoDetectBatches();
+        Button assignBtn = new Button("Assign batches…");
+        assignBtn.setOnAction(e -> assignBatches());
+        batchSummaryLabel.setStyle("-fx-font-size: 11px; -fx-text-fill: #666;");
+        updateBatchSummary();
+        HBox batchRow = new HBox(8, assignBtn, batchSummaryLabel);
+        batchRow.setAlignment(Pos.CENTER_LEFT);
+        VBox batchBox = new VBox(6, new Label("Batch grouping (used for per-batch mode + QC):"), batchRow);
 
         // Granularity.
         perImageRadio.setToggleGroup(granularityGroup);
@@ -302,102 +293,41 @@ public class BatchNormalizationDialog {
 
     // ── Batch grouping ───────────────────────────────────────────────────────
 
-    /** Resolve image → batch for all cohort images per the chosen mode. */
+    /** Seed the image→batch map by detecting a {@code batch\d+} token in each name (a starting point only). */
+    private void autoDetectBatches() {
+        Pattern p = Pattern.compile("(?i)batch\\s*\\d+");
+        for (String name : allImageNames) {
+            Matcher m = p.matcher(name);
+            manualBatch.put(name, m.find() ? m.group() : "(unassigned)");
+        }
+    }
+
+    /** Open the table editor to assign images to batches. */
+    private void assignBatches() {
+        List<String> names = allImageNames.isEmpty() ? new ArrayList<>(manualBatch.keySet()) : allImageNames;
+        Map<String, String> result = new BatchAssignmentPane(stage, names, manualBatch).showAndWait();
+        if (result != null) {
+            manualBatch = result;
+            updateBatchSummary();
+        }
+    }
+
+    private void updateBatchSummary() {
+        Map<String, Integer> counts = new TreeMap<>();
+        for (String name : selectedImages.isEmpty() ? manualBatch.keySet() : selectedImages) {
+            counts.merge(manualBatch.getOrDefault(name, "(unassigned)"), 1, Integer::sum);
+        }
+        batchSummaryLabel.setText(counts.isEmpty() ? "no images" : (counts.size() + " batch(es): " + counts));
+    }
+
+    /** Resolve image → batch for the cohort images, defaulting to {@code (unassigned)}. */
     private Map<String, String> resolveBatches(List<ProjectImageEntry<BufferedImage>> entries) {
         Map<String, String> map = new LinkedHashMap<>();
-        boolean regexMode = batchFromNameRadio.isSelected();
-        Pattern pattern = null;
-        if (regexMode) {
-            try {
-                pattern = Pattern.compile(batchRegexField.getText().trim());
-            } catch (Exception e) {
-                pattern = null;
-            }
-        }
         for (ProjectImageEntry<BufferedImage> e : entries) {
             String name = e.getImageName();
-            String batch = "(unassigned)";
-            if (regexMode && pattern != null) {
-                Matcher m = pattern.matcher(name);
-                if (m.find()) {
-                    batch = m.group();
-                }
-            } else if (!regexMode) {
-                batch = csvBatchMap.getOrDefault(name, csvBatchMap.getOrDefault(stripExt(name), "(unassigned)"));
-            }
-            map.put(name, batch);
+            map.put(name, manualBatch.getOrDefault(name, "(unassigned)"));
         }
         return map;
-    }
-
-    private void previewGroups() {
-        var project = currentProject();
-        if (project == null && extraProjects.isEmpty()) {
-            log("No project open.");
-            return;
-        }
-        Map<String, String> map = resolveBatches(buildCohortEntries(project));
-        Map<String, Integer> counts = new TreeMap<>();
-        for (String b : map.values()) {
-            counts.merge(b, 1, Integer::sum);
-        }
-        log("Batch groups: " + counts);
-    }
-
-    private void loadBatchCsv() {
-        File f = FileChoosers.promptForFile(
-                "Select an image,batch CSV", FileChoosers.createExtensionFilter("CSV", "*.csv"));
-        if (f == null) {
-            return;
-        }
-        try {
-            List<String> lines = Files.readAllLines(f.toPath());
-            csvBatchMap = parseBatchCsv(lines);
-            csvLabel.setText(f.getName() + " (" + csvBatchMap.size() + " rows)");
-            batchFromCsvRadio.setSelected(true);
-            log("Loaded batch CSV: " + csvBatchMap.size() + " image→batch rows.");
-        } catch (Exception ex) {
-            Dialogs.showErrorNotification("CellTune", "Could not read CSV: " + ex.getMessage());
-        }
-    }
-
-    /** Parse an {@code image,batch} CSV: uses columns named image/batch (case-insensitive) or the first two columns. */
-    static Map<String, String> parseBatchCsv(List<String> lines) {
-        Map<String, String> map = new LinkedHashMap<>();
-        if (lines.isEmpty()) {
-            return map;
-        }
-        String[] header = splitCsv(lines.get(0));
-        int imgCol = 0;
-        int batchCol = 1;
-        for (int i = 0; i < header.length; i++) {
-            String h = header[i].trim().toLowerCase(Locale.US);
-            if (h.equals("image") || h.equals("image_name") || h.equals("imagename")) {
-                imgCol = i;
-            } else if (h.equals("batch") || h.equals("group")) {
-                batchCol = i;
-            }
-        }
-        for (int r = 1; r < lines.size(); r++) {
-            String[] c = splitCsv(lines.get(r));
-            if (c.length > Math.max(imgCol, batchCol)) {
-                String img = c[imgCol].trim();
-                String batch = c[batchCol].trim();
-                if (!img.isEmpty()) {
-                    map.put(img, batch);
-                }
-            }
-        }
-        return map;
-    }
-
-    private static String[] splitCsv(String line) {
-        return line.split(",", -1);
-    }
-
-    private static String stripExt(String name) {
-        int dot = name.indexOf('.');
-        return dot > 0 ? name.substring(0, dot) : name;
     }
 
     // ── Run: fit ─────────────────────────────────────────────────────────────
@@ -570,6 +500,7 @@ public class BatchNormalizationDialog {
         if (chosen != null) {
             selectedImages = chosen;
             imagesCountLabel.setText(imageCountText());
+            updateBatchSummary();
         }
     }
 
