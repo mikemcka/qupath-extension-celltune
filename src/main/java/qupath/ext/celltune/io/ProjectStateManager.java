@@ -927,4 +927,20 @@ public class ProjectStateManager {
     public static CellTypeTable loadMarkerTable(Project<?> project) {
         return MarkerTablePersistence.loadMarkerTable(project);
     }
+
+    /**
+     * Save UniFORM batch-normalization scales to {@code <project>/celltune/batch-shifts.json}
+     * so the clustering "use batch-corrected values" path and future runs can reuse them.
+     */
+    public static void saveBatchShifts(
+            Project<?> project, qupath.ext.celltune.model.BatchNormalizerCohort.NormalizerFit fit) throws IOException {
+        BatchNormPersistence.saveFit(project, fit);
+    }
+
+    /**
+     * Load persisted batch-normalization scales, or {@code null} if none exist / unreadable.
+     */
+    public static qupath.ext.celltune.model.BatchShifts loadBatchShifts(Project<?> project) {
+        return BatchNormPersistence.load(project);
+    }
 }
