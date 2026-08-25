@@ -101,6 +101,25 @@ public class CellTuneExtension implements QuPathExtension, BinaryClassifierManag
     private static final IntegerProperty xgbMaxBinProperty =
             PathPrefs.createPersistentPreference("celltune.xgbMaxBin", 0);
 
+    /**
+     * When on, clustering and classifier feature extraction stream the persisted UniFORM
+     * batch-correction gains (from {@code <project>/celltune/batch-shifts.json}) — each cell's
+     * measurements are multiplied by its image's per-channel scale before use, so no corrected
+     * columns need be written. Off by default; fitting scales does nothing until this is enabled.
+     */
+    private static final BooleanProperty useBatchCorrectionProperty =
+            PathPrefs.createPersistentPreference("celltune.useBatchCorrection", false);
+
+    /** @return the persistent "stream batch-corrected values into clustering + ML" toggle. */
+    public static BooleanProperty useBatchCorrectionProperty() {
+        return useBatchCorrectionProperty;
+    }
+
+    /** @return whether batch-corrected values should be streamed into feature extraction. */
+    public static boolean useBatchCorrection() {
+        return useBatchCorrectionProperty.get();
+    }
+
     static {
         TrainingThreads.setOverride(trainingThreadsProperty.get());
         trainingThreadsProperty.addListener((v, o, n) -> TrainingThreads.setOverride(n == null ? 0 : n.intValue()));
@@ -693,7 +712,15 @@ public class CellTuneExtension implements QuPathExtension, BinaryClassifierManag
                         + "but verify on your own data (export the cell table before and after and diff the "
                         + "predicted class column) before settling on a value.")
                 .build();
-        qupath.getPreferencePane().getPropertySheet().getItems().addAll(item, maxBinItem);
+        var batchCorrItem = new PropertyItemBuilder<>(useBatchCorrectionProperty, Boolean.class)
+                .name("Use batch-corrected values")
+                .category(EXTENSION_NAME)
+                .description("Stream persisted UniFORM batch-correction gains into clustering and classifier "
+                        + "feature extraction. Each cell's measurements are multiplied by its image's per-channel "
+                        + "scale from <project>/celltune/batch-shifts.json before use — no corrected columns are "
+                        + "written. Run Batch Normalisation first to create the scales; off by default.")
+                .build();
+        qupath.getPreferencePane().getPropertySheet().getItems().addAll(item, maxBinItem, batchCorrItem);
     }
 
     /**

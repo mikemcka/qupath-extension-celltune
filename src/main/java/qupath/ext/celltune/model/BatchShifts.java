@@ -34,23 +34,52 @@ public final class BatchShifts {
     public BatchShifts() {}
 
     /**
-     * Multiplicative scale for a given image and marker feature name; {@code 1.0} (no-op)
-     * when the marker was not corrected or the image was not in the fit.
+     * Multiplicative gain for a given image and measurement, resolved by <b>channel</b>:
+     * the gain was fitted per (image, channel), so any statistic of a corrected channel
+     * (Mean, Median, percentiles, Std, erosion/expansion/environment bins) gets the same
+     * factor — even stats that were not themselves in the fit's selection. Returns
+     * {@code 1.0} (no-op) when the channel was not corrected or the image was not in the fit.
      */
-    public double scaleFor(String image, String markerFeature) {
+    public double scaleFor(String image, String feature) {
         if (markers == null || scaleByImage == null) {
             return 1.0;
         }
-        int idx = markers.indexOf(markerFeature);
-        if (idx < 0) {
-            return 1.0;
-        }
         double[] scales = scaleByImage.get(image);
-        if (scales == null || idx >= scales.length) {
+        if (scales == null) {
             return 1.0;
         }
-        double s = scales[idx];
-        return (Double.isNaN(s) || Double.isInfinite(s) || s <= 0) ? 1.0 : s;
+        String channel = BatchNormalizerCohort.channelOf(feature);
+        for (int i = 0; i < markers.size() && i < scales.length; i++) {
+            if (BatchNormalizerCohort.channelOf(markers.get(i)).equals(channel)) {
+                double s = scales[i];
+                return (Double.isNaN(s) || Double.isInfinite(s) || s <= 0) ? 1.0 : s;
+            }
+        }
+        return 1.0;
+    }
+
+    /**
+     * Per-feature gain array for {@code image}, aligned to {@code featureNames} — a
+     * {@code CellFeatureExtractor} multiplies each measurement by this before any transform.
+     * Uncorrected channels get {@code 1.0}. Precomputes a channel→scale map once so the
+     * per-feature lookup is cheap even for wide feature sets.
+     */
+    public double[] scaleArray(String image, List<String> featureNames) {
+        double[] out = new double[featureNames.size()];
+        java.util.Map<String, Double> byChannel = new java.util.HashMap<>();
+        double[] scales = scaleByImage == null ? null : scaleByImage.get(image);
+        if (scales != null && markers != null) {
+            for (int i = 0; i < markers.size() && i < scales.length; i++) {
+                double s = scales[i];
+                if (!(Double.isNaN(s) || Double.isInfinite(s) || s <= 0)) {
+                    byChannel.putIfAbsent(BatchNormalizerCohort.channelOf(markers.get(i)), s);
+                }
+            }
+        }
+        for (int j = 0; j < out.length; j++) {
+            out[j] = byChannel.getOrDefault(BatchNormalizerCohort.channelOf(featureNames.get(j)), 1.0);
+        }
+        return out;
     }
 
     /** Whether this fit has any usable per-image scales. */

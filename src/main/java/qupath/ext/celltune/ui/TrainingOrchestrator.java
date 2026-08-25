@@ -63,6 +63,7 @@ final class TrainingOrchestrator {
             String scope,
             List<String> featureNames,
             FeatureNormalizer normalizer,
+            qupath.ext.celltune.model.BatchShifts batchShifts,
             Consumer<String> trainLog) {
         List<float[]> supplementaryRows = new ArrayList<>();
         List<String> supplementaryLabels = new ArrayList<>();
@@ -100,6 +101,7 @@ final class TrainingOrchestrator {
 
                 var otherExtractor = new CellFeatureExtractor(featureNames);
                 otherExtractor.setNormalizer(normalizer);
+                qupath.ext.celltune.BatchCorrection.applyTo(otherExtractor, batchShifts, entry.getImageName());
                 Map<String, PathObject> otherCellById = new LinkedHashMap<>();
                 for (PathObject cell : otherDetections) {
                     otherCellById.put(cell.getID().toString(), cell);
@@ -149,6 +151,7 @@ final class TrainingOrchestrator {
             DualModelClassifier classifier,
             List<String> featureNames,
             FeatureNormalizer normalizer,
+            qupath.ext.celltune.model.BatchShifts batchShifts,
             Object hierarchyEventSource,
             Consumer<String> trainLog) {
         var currentEntry = project.getEntry(currentImageData);
@@ -211,6 +214,7 @@ final class TrainingOrchestrator {
 
                     var otherExtractor = new CellFeatureExtractor(featureNames);
                     otherExtractor.setNormalizer(normalizer);
+                    qupath.ext.celltune.BatchCorrection.applyTo(otherExtractor, batchShifts, imgNameFinal);
                     var otherPredAll = classifier.predictAndCollect(
                             otherDetections, otherExtractor, m -> trainLog.accept("[" + imgNameFinal + "] " + m));
 

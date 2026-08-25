@@ -852,6 +852,7 @@ public final class CohortClusterModel {
             List<String> markers,
             String classFilter,
             FeatureNormalizer normalizer,
+            BatchShifts batchShifts,
             ImageData<BufferedImage> openData,
             String openName,
             CancellationToken token,
@@ -908,6 +909,11 @@ public final class CohortClusterModel {
             if (n == 0) {
                 log.accept("[" + name + "] no detections — skipped");
                 continue;
+            }
+            // Per-image UniFORM gain (streamed): re-set the shared extractor's scale for this
+            // image before extraction. Safe because pooling is single-threaded across images.
+            if (batchShifts != null) {
+                extractor.setBatchScale(batchShifts.scaleArray(name, markers));
             }
             float[] flat = extractor.extractMatrix(cells);
             int pooledFromImage = 0;
@@ -1294,6 +1300,7 @@ public final class CohortClusterModel {
             int pcaMaxComponents,
             String classFilter,
             FeatureNormalizer normalizer,
+            BatchShifts batchShifts,
             ImageData<BufferedImage> openData,
             String openName,
             CancellationToken token,
@@ -1301,8 +1308,8 @@ public final class CohortClusterModel {
             DoubleConsumer progress) {
 
         log.accept(String.format("Pooling %d image(s)…", images.size()));
-        PooledData pooled =
-                poolAllCells(project, images, markers, classFilter, normalizer, openData, openName, token, log);
+        PooledData pooled = poolAllCells(
+                project, images, markers, classFilter, normalizer, batchShifts, openData, openName, token, log);
 
         if (pooled.cancelled() || (token != null && token.isCancelled())) {
             log.accept("Cancelled during pooling — no images written.");

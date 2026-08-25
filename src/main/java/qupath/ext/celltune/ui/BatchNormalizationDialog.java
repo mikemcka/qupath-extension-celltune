@@ -15,6 +15,7 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.RadioButton;
@@ -30,6 +31,7 @@ import javafx.stage.Modality;
 import javafx.stage.Stage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.celltune.CellTuneExtension;
 import qupath.ext.celltune.io.ProjectStateManager;
 import qupath.ext.celltune.model.BatchNormalizerApply;
 import qupath.ext.celltune.model.BatchNormalizerCohort;
@@ -233,6 +235,14 @@ public class BatchNormalizationDialog {
         HBox actions = new HBox(10, qcBtn, writeBtn, cancelBtn, runBtn, closeBtn);
         actions.setAlignment(Pos.CENTER_RIGHT);
 
+        // Streaming toggle: apply the fitted gains on-the-fly in clustering + classifier feature
+        // extraction (no columns written). Bound to the persistent pref so it's one switch everywhere.
+        CheckBox useCorrectedBox = new CheckBox("Use batch-corrected values in clustering + ML (streamed, no columns)");
+        useCorrectedBox.selectedProperty().bindBidirectional(CellTuneExtension.useBatchCorrectionProperty());
+        useCorrectedBox.setTooltip(new Tooltip("When on, clustering and classifier training/inference multiply each "
+                + "cell's measurements by its image's per-channel gain from the saved fit. Write corrected columns "
+                + "only if you also need the values in QuPath tables or exports."));
+
         VBox root = new VBox(
                 10,
                 new Label("Correct measurements:"),
@@ -244,6 +254,7 @@ public class BatchNormalizationDialog {
                 granBox,
                 paramsRow,
                 new Separator(),
+                useCorrectedBox,
                 statusLabel,
                 progressBar,
                 logArea,
