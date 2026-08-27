@@ -20,6 +20,11 @@ public class CellFeatureExtractor {
 
     private final List<String> featureNames;
     private FeatureNormalizer normalizer;
+    // Optional per-image UniFORM batch-correction gain, aligned to featureNames (null = none).
+    // Applied to the raw value BEFORE any normalizer transform, so it corrects the measurement
+    // itself. Set per image (the extractor is built per image), so streaming correction needs no
+    // written columns. See BatchShifts.scaleArray.
+    private double[] batchScale;
 
     /**
      * Create an extractor with a specific ordered list of feature (measurement) names.
@@ -49,6 +54,20 @@ public class CellFeatureExtractor {
     /** @return the current normalizer, or null if none set */
     public FeatureNormalizer getNormalizer() {
         return normalizer;
+    }
+
+    /**
+     * Set the per-image batch-correction gain (aligned to this extractor's feature names),
+     * applied to each raw value before the normalizer. Pass {@code null} to disable. A length
+     * mismatch is ignored (treated as disabled) to fail safe rather than corrupt features.
+     */
+    public void setBatchScale(double[] batchScale) {
+        this.batchScale = (batchScale != null && batchScale.length == featureNames.size()) ? batchScale : null;
+    }
+
+    /** @return true if a per-image batch-correction gain is set. */
+    public boolean hasBatchScale() {
+        return batchScale != null;
     }
 
     /**
@@ -96,6 +115,9 @@ public class CellFeatureExtractor {
         for (int i = 0; i < featureNames.size(); i++) {
             double v = mlist.get(featureNames.get(i));
             row[i] = Double.isNaN(v) ? 0f : (float) v;
+            if (batchScale != null) {
+                row[i] *= (float) batchScale[i];
+            }
             if (normalizer != null) {
                 row[i] = normalizer.apply(featureNames.get(i), row[i]);
             }
@@ -104,10 +126,13 @@ public class CellFeatureExtractor {
     }
 
     /**
-     * Extract a single cell's raw measurements (no normalisation) as a float array.
+     * Extract a single cell's raw measurements as a float array, with no normalizer transform.
+     * A per-image {@link #setBatchScale batch-correction gain}, if set, IS still applied — it
+     * corrects the measurement itself and is not part of the arcsinh/z-score "normalization"
+     * the classifier deliberately skips.
      *
      * @param cell the detection object to extract features from
-     * @return float array of length {@link #getNumFeatures()}, raw values only
+     * @return float array of length {@link #getNumFeatures()}
      */
     public float[] extractRowRaw(PathObject cell) {
         var mlist = cell.getMeasurementList();
@@ -115,6 +140,9 @@ public class CellFeatureExtractor {
         for (int i = 0; i < featureNames.size(); i++) {
             double v = mlist.get(featureNames.get(i));
             row[i] = Double.isNaN(v) ? 0f : (float) v;
+            if (batchScale != null) {
+                row[i] *= (float) batchScale[i];
+            }
         }
         return row;
     }
@@ -142,6 +170,9 @@ public class CellFeatureExtractor {
             for (int j = 0; j < nFeatures; j++) {
                 double v = mlist.get(featureNames.get(j));
                 matrix[offset + j] = Double.isNaN(v) ? 0f : (float) v;
+                if (batchScale != null) {
+                    matrix[offset + j] *= (float) batchScale[j];
+                }
                 if (normalizer != null) {
                     matrix[offset + j] = normalizer.apply(featureNames.get(j), matrix[offset + j]);
                 }

@@ -506,6 +506,7 @@ class CohortClusterModelTest {
                 0,
                 null,
                 null,
+                null, // batchShifts
                 null,
                 null,
                 token,
@@ -552,6 +553,7 @@ class CohortClusterModelTest {
                 0,
                 null,
                 null,
+                null, // batchShifts
                 null,
                 null,
                 new CancellationToken(),
@@ -610,6 +612,7 @@ class CohortClusterModelTest {
                 0,
                 "Tumor",
                 null,
+                null, // batchShifts
                 null,
                 null,
                 new CancellationToken(),
@@ -665,7 +668,7 @@ class CohortClusterModelTest {
         CohortClusterModel.PooledData raw =
                 CohortClusterModel.poolAllCellsRaw(project, images, markers, null, null, null, null, token, s -> {});
         CohortClusterModel.PooledData z =
-                CohortClusterModel.poolAllCells(project, images, markers, null, null, null, null, token, s -> {});
+                CohortClusterModel.poolAllCells(project, images, markers, null, null, null, null, null, token, s -> {});
 
         // Both pool EVERY cell (no sampling): 5 + 3 = 8 rows.
         assertEquals(8, raw.rows().length, "poolAllCellsRaw must pool every cell (no sampling)");

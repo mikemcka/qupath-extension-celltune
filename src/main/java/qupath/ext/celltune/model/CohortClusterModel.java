@@ -20,9 +20,9 @@ import qupath.lib.images.ImageData;
 import qupath.lib.objects.PathObject;
 import qupath.lib.objects.PathObjectFilter;
 import qupath.lib.objects.classes.PathClass;
-import qupath.lib.roi.interfaces.ROI;
 import qupath.lib.projects.Project;
 import qupath.lib.projects.ProjectImageEntry;
+import qupath.lib.roi.interfaces.ROI;
 
 /**
  * Headless, memory-safe backend for project-wide cell clustering. It owns the two
@@ -878,12 +878,23 @@ public final class CohortClusterModel {
             List<String> markers,
             String classFilter,
             FeatureNormalizer normalizer,
+            BatchShifts batchShifts,
             ImageData<BufferedImage> openData,
             String openName,
             CancellationToken token,
             Consumer<String> log) {
         return poolAllCells(
-                project, images, markers, classFilter, List.of(), normalizer, openData, openName, token, log);
+                project,
+                images,
+                markers,
+                classFilter,
+                List.of(),
+                normalizer,
+                batchShifts,
+                openData,
+                openName,
+                token,
+                log);
     }
 
     /**
@@ -900,6 +911,7 @@ public final class CohortClusterModel {
             String classFilter,
             List<String> annotationKeywords,
             FeatureNormalizer normalizer,
+            BatchShifts batchShifts,
             ImageData<BufferedImage> openData,
             String openName,
             CancellationToken token,
@@ -965,6 +977,11 @@ public final class CohortClusterModel {
                     log.accept("[" + name + "] no cells in the specified annotation(s) — skipped");
                     continue;
                 }
+            }
+            // Per-image UniFORM gain (streamed): re-set the shared extractor's scale for this
+            // image before extraction. Safe because pooling is single-threaded across images.
+            if (batchShifts != null) {
+                extractor.setBatchScale(batchShifts.scaleArray(name, markers));
             }
             float[] flat = extractor.extractMatrix(cells);
             int pooledFromImage = 0;
@@ -1354,15 +1371,32 @@ public final class CohortClusterModel {
             int pcaMaxComponents,
             String classFilter,
             FeatureNormalizer normalizer,
+            BatchShifts batchShifts,
             ImageData<BufferedImage> openData,
             String openName,
             CancellationToken token,
             Consumer<String> log,
             DoubleConsumer progress) {
         return writeClusterAllCells(
-                project, images, markers, graphK, resolution, randomStarts, seed, reproducible,
-                pcaEnabled, pcaMaxComponents, classFilter, List.of(), normalizer, openData, openName,
-                token, log, progress);
+                project,
+                images,
+                markers,
+                graphK,
+                resolution,
+                randomStarts,
+                seed,
+                reproducible,
+                pcaEnabled,
+                pcaMaxComponents,
+                classFilter,
+                List.of(),
+                normalizer,
+                batchShifts,
+                openData,
+                openName,
+                token,
+                log,
+                progress);
     }
 
     /**
@@ -1386,6 +1420,7 @@ public final class CohortClusterModel {
             String classFilter,
             List<String> annotationKeywords,
             FeatureNormalizer normalizer,
+            BatchShifts batchShifts,
             ImageData<BufferedImage> openData,
             String openName,
             CancellationToken token,
@@ -1394,7 +1429,17 @@ public final class CohortClusterModel {
 
         log.accept(String.format("Pooling %d image(s)…", images.size()));
         PooledData pooled = poolAllCells(
-                project, images, markers, classFilter, annotationKeywords, normalizer, openData, openName, token, log);
+                project,
+                images,
+                markers,
+                classFilter,
+                annotationKeywords,
+                normalizer,
+                batchShifts,
+                openData,
+                openName,
+                token,
+                log);
 
         if (pooled.cancelled() || (token != null && token.isCancelled())) {
             log.accept("Cancelled during pooling — no images written.");

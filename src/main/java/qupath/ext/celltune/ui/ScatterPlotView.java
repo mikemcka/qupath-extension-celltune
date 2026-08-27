@@ -42,6 +42,7 @@ import javafx.stage.Stage;
 import javax.imageio.ImageIO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.celltune.BatchCorrection;
 import qupath.ext.celltune.model.AnnRecallException;
 import qupath.ext.celltune.model.AnnotationCellFilter;
 import qupath.ext.celltune.model.CellFeatureExtractor;
@@ -2159,6 +2160,7 @@ public class ScatterPlotView {
                                         classFilter,
                                         annoKeywords,
                                         normalizer,
+                                        BatchCorrection.loadIfEnabled(project),
                                         openData,
                                         openName,
                                         token,

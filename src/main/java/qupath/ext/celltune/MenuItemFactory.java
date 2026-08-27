@@ -118,6 +118,7 @@ final class MenuItemFactory {
                                 resources.getString("menu.neighborhoods"),
                                 enabled,
                                 () -> ext.showCellularNeighborhoods(qupath)),
+                        item(resources.getString("menu.batchnorm"), enabled, () -> ext.showBatchNormalization(qupath)),
                         item("Generate Distance Measurements...", enabled, () -> ext.showDistanceMeasurements(qupath)),
                         new SeparatorMenuItem(),
                         exportMenu,

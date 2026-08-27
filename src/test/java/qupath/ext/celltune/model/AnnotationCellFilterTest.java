@@ -67,11 +67,18 @@ class AnnotationCellFilterTest {
         h.addObject(namedAnnotation("Stroma", 100, 100, 10, 10));
 
         // Case-insensitive substring on one keyword.
-        assertEquals(1, AnnotationCellFilter.matchingAnnotationRois(h, List.of("tumour")).size());
+        assertEquals(
+                1,
+                AnnotationCellFilter.matchingAnnotationRois(h, List.of("tumour"))
+                        .size());
         // Multiple keywords match multiple annotations.
-        assertEquals(2, AnnotationCellFilter.matchingAnnotationRois(h, List.of("tumour", "strom")).size());
+        assertEquals(
+                2,
+                AnnotationCellFilter.matchingAnnotationRois(h, List.of("tumour", "strom"))
+                        .size());
         // No match.
-        assertTrue(AnnotationCellFilter.matchingAnnotationRois(h, List.of("immune")).isEmpty());
+        assertTrue(AnnotationCellFilter.matchingAnnotationRois(h, List.of("immune"))
+                .isEmpty());
         // Empty keyword list = no filter target (empty result).
         assertTrue(AnnotationCellFilter.matchingAnnotationRois(h, List.of()).isEmpty());
     }
