@@ -62,7 +62,13 @@ Windows and boxes can be expanded or contracted by clicking and dragging corners
     - [18.6 Parallel workers (project scope) — performance](#186-parallel-workers-project-scope--performance)
     - [18.7 Viewer overlays](#187-viewer-overlays)
     - [18.8 Tips & cautions](#188-tips--cautions)
-19. [Tips, tricks and known limitations](#19-tips-tricks-and-known-limitations)
+19. [Batch normalisation (UniFORM)](#19-batch-normalisation-uniform)
+    - [19.1 When to use it](#191-when-to-use-it)
+    - [19.2 Fitting — step by step](#192-fitting--step-by-step)
+    - [19.3 QC — did it work?](#193-qc--did-it-work)
+    - [19.4 How it's applied](#194-how-its-applied)
+    - [19.5 Tips & cautions](#195-tips--cautions)
+20. [Tips, tricks and known limitations](#20-tips-tricks-and-known-limitations)
 
 ---
 
@@ -203,7 +209,7 @@ You pick **which** features to transform and **one** transform/cofactor applied 
 Two things it does **not** do:
 
 - **It never touches the classifier.** The phenotyping model always trains and predicts on **raw** values — normalisation is applied only in the clustering path. (Even if it were applied, XGBoost / LightGBM / Random Forest split on rank order and arcsinh is a strictly increasing rescale, so predictions would be unchanged at any cofactor.) Auto-prune, feature-importance/SHAP, and ground-truth export all operate on the same raw values the model sees; export no longer writes `__norm` columns.
-- **It does not correct slide-to-slide (batch) differences, so it does not improve generalisation to unseen slides.** The same global transform is applied identically to every image, so it uses no per-image information and cannot remove per-slide staining/exposure offsets. Generalising across variable samples is a **batch-correction** problem (per-image or reference-based alignment) plus annotating a **diversity** of slides — not something arcsinh addresses.
+- **It does not correct slide-to-slide (batch) differences, so it does not improve generalisation to unseen slides.** The same global transform is applied identically to every image, so it uses no per-image information and cannot remove per-slide staining/exposure offsets. Generalising across variable samples is a **batch-correction** problem (per-image or reference-based alignment) plus annotating a **diversity** of slides — not something arcsinh addresses. CellTune provides per-image batch correction via UniFORM: see §[19](#19-batch-normalisation-uniform).
 
 **What this pane configures vs. what clustering always does.** The arcsinh/sqrt transform here is only **stage 1** of the clustering normalisation, and it is **optional** — leave it off and clustering still runs. The full pipeline every clustering fit applies is:
 
@@ -1212,6 +1218,7 @@ All under *Extensions → CellTune Classifier*.
 | Class Control... | Project | Add/Delete/Merge/Undo Merge classes. |
 | Select Features... | Project | Pick which measurement columns are used for training. |
 | Clustering Normalisation | Project | Per-feature arcsinh/sqrt with shared cofactor (clustering-only; classifier uses raw). |
+| Batch Normalisation... | Project | UniFORM per-image marker-intensity alignment across a cohort; fit + QC, streamed into clustering + ML or written as `(batchnorm)` columns. See §[19](#19-batch-normalisation-uniform). |
 | Project Prediction Summary... | Project | Cohort QC, anomaly scoring, per-image flags. |
 | Image Pixel Prescreen... | Project | Cells-free whole-image QC: per-channel pixel statistics on a low-res pyramid level, cohort z-scores, verdicts/flags (background-heavy, saturated, weak signal, intensity outlier), CSV export. See §[17](#17-image-pixel-prescreen-whole-image-qc-no-cells-needed). |
 | Intensity Heatmaps... | Open image with detections | Phenotype × marker mean-intensity heatmap (z-score coloured), per-image / project-combined, PNG/CSV export. See §[9](#9-intensity-heatmaps). |
@@ -1517,7 +1524,51 @@ Each toggle flips back to the classification colouring on a second click, and **
 
 ---
 
-## 19. Tips, tricks and known limitations
+## 19. Batch normalisation (UniFORM)
+
+Multiplex staining varies image-to-image — the same marker can sit at a different intensity on different slides or runs. **Batch normalisation** aligns each image's marker-intensity distribution to a common reference so that clustering and the classifier see one consistent intensity scale across a cohort, instead of learning the batch. CellTune implements the **feature-level UniFORM** method (Wang et al., *Cell Reports Methods* 2025; see [README ▸ References](README.md#references)): for each marker it aligns per-image log-intensity histograms by the rigid shift that best matches a reference, and that shift maps back to a single per-image multiplicative **gain** per channel. Because it is a translation in log-space, the distribution's *shape* is preserved — only its location moves — so it is conservative about erasing real biology.
+
+Open it from **Extensions ▸ CellTune Classifier ▸ Batch Normalisation…**.
+
+> The gain is computed from each channel's **Cell: Mean** intensities and then applied to every statistic of that channel. Only intensity measurements are corrected; foundation-model embeddings are excluded. Nothing is overwritten unless you explicitly write columns — see §19.4.
+
+### 19.1 When to use it
+
+- You cluster or train **across multiple images/slides** stained in different runs and see clusters or classes that track the *slide* rather than the biology.
+- It complements the clustering normalisation of §[4.2](#42-clustering-normalisation) (arcsinh/sqrt): that applies the **same** transform to every image and so cannot remove per-slide offsets (it says as much in its own limitations). Batch normalisation is the missing per-image step. Single-image analysis does not need it.
+
+### 19.2 Fitting — step by step
+
+1. **Correct measurements** — *Choose measurements…* picks the marker intensities to align (embeddings are excluded automatically).
+2. **Images** — *Choose images…* picks the cohort. *Also include projects ▸ Add project…* pools images from other CellTune projects into the same fit (they must share the marker/measurement names); *Clear* resets.
+3. **Batch grouping** (optional) — *Assign batches…* opens an Image → Batch table. Assign by double-clicking a cell, selecting rows → *Assign selected → batch…*, **Auto-detect from name**, or **Load CSV…**. The grouping drives per-batch mode and the QC view.
+4. **Granularity** —
+   - **Per image** — each image is aligned to the reference independently (finest correction).
+   - **Per batch** — images pooled within a batch are aligned together (uses the grouping above).
+5. **Advanced** — **Bins** (log-histogram resolution, default 1024), **Cells/image** (subsample cap for the fit, default 50,000), **Workers** (images processed in parallel).
+6. **Run fit** — computes the per-image/per-batch gains and saves them to `<project>/celltune/batch-shifts.json`. The fit persists across sessions and can be re-run any time.
+
+### 19.3 QC — did it work?
+
+**Show QC** opens *Batch Normalisation — QC*: per-marker log-intensity density curves (one per batch) with a spread (SD) readout. **Lower SD = better aligned** — the curves should overlap after correction. Scan a few markers to confirm the batches were pulled together without collapsing genuine structure.
+
+### 19.4 How it's applied
+
+Two independent options:
+
+- **Streamed (recommended)** — tick **"Use batch-corrected values in clustering + ML"**. Clustering *and* classifier training/inference then multiply each cell's measurements by that image's fitted gain **in memory** before use: no columns are written, nothing on the cells changes, and the correction is applied consistently at every seam (clustering, training, and single-image auto-classify / batch-apply to other images). It is a persistent project preference (`celltune.useBatchCorrection`), so it stays on until you untick it, and is a no-op when no fit exists.
+- **Written columns** — **Write corrected columns** materialises the corrected values as new `…(batchnorm)` measurement columns (for export or inspection). The raw columns are left intact.
+
+### 19.5 Tips & cautions
+
+- **Fit before you cluster or train** — the streamed toggle only does anything once a fit exists in the project.
+- **Grouping matters for per-batch mode** — with everything in one batch, per-batch mode is just a single-reference alignment; *Auto-detect from name* bootstraps groups from filename conventions.
+- **It can over-correct** — treating each slide as a batch can erase real biology if a cohort genuinely differs by group. QC each marker, and don't batch-correct across groups you expect to differ (mirrors the caution in §[18.8](#188-tips--cautions)).
+- **Cross-project fits** require a shared marker panel — measurement names must match across the pooled projects.
+
+---
+
+## 20. Tips, tricks and known limitations
 
 - **Label at least 20–30 cells per class** before the first Train, then trust the disagreement-driven Review Mode to grow your label set efficiently.
 - **Selecting cells** Hold Ctrl key on windows/linux or Command on Mac to select multiple cells at the same time to label.
