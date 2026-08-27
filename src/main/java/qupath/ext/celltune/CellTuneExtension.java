@@ -1303,9 +1303,18 @@ public class CellTuneExtension implements QuPathExtension, BinaryClassifierManag
         if (featureNames == null || featureNames.isEmpty()) return false;
 
         try {
-            // Raw inference — the classifier is trained on raw values (normalisation is
-            // a clustering-only concern; tree models are invariant to it anyway).
+            // Raw reads — the classifier trains on raw values (tree models are invariant
+            // to the monotone normalisation transforms, which stay clustering-only). But
+            // UniFORM batch correction is a per-IMAGE gain, NOT uniform across samples, so
+            // it MUST be streamed in here too: the training extractors apply it, so a model
+            // trained with correction must predict on the same corrected space or it is a
+            // train/serve skew (differently-scaled features at fit vs inference).
             var extractor = new CellFeatureExtractor(featureNames);
+            var batchProject = qupath.getProject();
+            String batchImageName = (batchProject != null && batchProject.getEntry(imageData) != null)
+                    ? batchProject.getEntry(imageData).getImageName()
+                    : null;
+            BatchCorrection.applyTo(extractor, BatchCorrection.loadIfEnabled(batchProject), batchImageName);
             classifier.predictOnly(
                     detections, extractor, true, msg -> logger.info("[CellTune] Auto-classify: {}", msg));
             predAll = classifier.getPredALL();
