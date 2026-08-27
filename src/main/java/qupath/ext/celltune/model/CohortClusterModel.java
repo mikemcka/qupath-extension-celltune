@@ -22,6 +22,7 @@ import qupath.lib.objects.PathObjectFilter;
 import qupath.lib.objects.classes.PathClass;
 import qupath.lib.projects.Project;
 import qupath.lib.projects.ProjectImageEntry;
+import qupath.lib.roi.interfaces.ROI;
 
 /**
  * Headless, memory-safe backend for project-wide cell clustering. It owns the two
@@ -129,11 +130,29 @@ public final class CohortClusterModel {
             int sampleCap,
             FeatureNormalizer normalizer,
             Consumer<String> log) {
+        return sample(project, images, markers, List.of(), sampleCap, normalizer, log);
+    }
+
+    /**
+     * As {@link #sample(Project, List, List, int, FeatureNormalizer, Consumer)}, but restricts each
+     * image's candidate cells to those whose centroid falls inside an annotation matching one of
+     * {@code annotationKeywords} (case-insensitive substring on name-or-class; see
+     * {@link AnnotationCellFilter}). An empty list samples from every cell.
+     */
+    public static SampleData sample(
+            Project<BufferedImage> project,
+            List<String> images,
+            List<String> markers,
+            List<String> annotationKeywords,
+            int sampleCap,
+            FeatureNormalizer normalizer,
+            Consumer<String> log) {
         Map<String, ProjectImageEntry<BufferedImage>> byName = entriesByName(project);
         int nMarkers = markers.size();
         int perImage = Math.max(1, sampleCap / Math.max(1, images.size()));
         Random rng = new Random(42);
         var extractor = new CellFeatureExtractor(markers, normalizer);
+        boolean annoFilterActive = annotationKeywords != null && !annotationKeywords.isEmpty();
 
         List<float[]> rows = new ArrayList<>();
         List<String> classes = new ArrayList<>();
@@ -159,9 +178,16 @@ public final class CohortClusterModel {
                 continue;
             }
             List<PathObject> cells = detections(imageData);
+            if (cells.isEmpty()) {
+                log.accept("[" + name + "] no detections — skipped");
+                continue;
+            }
+            if (annoFilterActive) {
+                cells = AnnotationCellFilter.filterByAnnotations(cells, imageData.getHierarchy(), annotationKeywords);
+            }
             int n = cells.size();
             if (n == 0) {
-                log.accept("[" + name + "] no detections — skipped");
+                log.accept("[" + name + "] no cells in the specified annotation(s) — skipped");
                 continue;
             }
             totalCells += n;
@@ -857,11 +883,45 @@ public final class CohortClusterModel {
             String openName,
             CancellationToken token,
             Consumer<String> log) {
+        return poolAllCells(
+                project,
+                images,
+                markers,
+                classFilter,
+                List.of(),
+                normalizer,
+                batchShifts,
+                openData,
+                openName,
+                token,
+                log);
+    }
+
+    /**
+     * As {@link #poolAllCells(Project, List, List, String, FeatureNormalizer, ImageData, String,
+     * CancellationToken, Consumer)}, but additionally restricts pooled cells to those whose centroid
+     * falls inside an annotation matching one of {@code annotationKeywords} (case-insensitive
+     * substring on name-or-class; see {@link AnnotationCellFilter}). An empty list pools every cell.
+     * The annotation filter combines with {@code classFilter} (both must pass).
+     */
+    public static PooledData poolAllCells(
+            Project<BufferedImage> project,
+            List<String> images,
+            List<String> markers,
+            String classFilter,
+            List<String> annotationKeywords,
+            FeatureNormalizer normalizer,
+            BatchShifts batchShifts,
+            ImageData<BufferedImage> openData,
+            String openName,
+            CancellationToken token,
+            Consumer<String> log) {
         Map<String, ProjectImageEntry<BufferedImage>> byName = entriesByName(project);
         int nMarkers = markers.size();
         var extractor = new CellFeatureExtractor(markers, normalizer);
         boolean classFilterActive = classFilter != null && !classFilter.isBlank();
         String classKw = classFilterActive ? classFilter.trim().toLowerCase() : null;
+        boolean annoFilterActive = annotationKeywords != null && !annotationKeywords.isEmpty();
 
         List<double[]> rawRows = new ArrayList<>();
         GrowableLongArray msbList = new GrowableLongArray();
@@ -910,6 +970,14 @@ public final class CohortClusterModel {
                 log.accept("[" + name + "] no detections — skipped");
                 continue;
             }
+            List<ROI> annoRois = null;
+            if (annoFilterActive) {
+                annoRois = AnnotationCellFilter.matchingAnnotationRois(imageData.getHierarchy(), annotationKeywords);
+                if (annoRois.isEmpty()) {
+                    log.accept("[" + name + "] no cells in the specified annotation(s) — skipped");
+                    continue;
+                }
+            }
             // Per-image UniFORM gain (streamed): re-set the shared extractor's scale for this
             // image before extraction. Safe because pooling is single-threaded across images.
             if (batchShifts != null) {
@@ -924,6 +992,9 @@ public final class CohortClusterModel {
                     if (pc == null || !pc.toString().toLowerCase().contains(classKw)) {
                         continue;
                     }
+                }
+                if (annoFilterActive && !AnnotationCellFilter.centroidInAny(cell, annoRois)) {
+                    continue;
                 }
                 double[] row = new double[nMarkers];
                 int off = i * nMarkers;
@@ -1306,10 +1377,69 @@ public final class CohortClusterModel {
             CancellationToken token,
             Consumer<String> log,
             DoubleConsumer progress) {
+        return writeClusterAllCells(
+                project,
+                images,
+                markers,
+                graphK,
+                resolution,
+                randomStarts,
+                seed,
+                reproducible,
+                pcaEnabled,
+                pcaMaxComponents,
+                classFilter,
+                List.of(),
+                normalizer,
+                batchShifts,
+                openData,
+                openName,
+                token,
+                log,
+                progress);
+    }
+
+    /**
+     * As {@link #writeClusterAllCells(Project, List, List, int, double, int, long, boolean, boolean,
+     * int, String, FeatureNormalizer, ImageData, String, CancellationToken, Consumer, DoubleConsumer)},
+     * but restricts the pooled cohort to cells whose centroid falls inside an annotation matching one
+     * of {@code annotationKeywords} (see {@link AnnotationCellFilter}). An empty list clusters every
+     * cell. Cells outside the matched annotations are left with no {@code Cluster} measurement.
+     */
+    public static AllCellsResult writeClusterAllCells(
+            Project<BufferedImage> project,
+            List<String> images,
+            List<String> markers,
+            int graphK,
+            double resolution,
+            int randomStarts,
+            long seed,
+            boolean reproducible,
+            boolean pcaEnabled,
+            int pcaMaxComponents,
+            String classFilter,
+            List<String> annotationKeywords,
+            FeatureNormalizer normalizer,
+            BatchShifts batchShifts,
+            ImageData<BufferedImage> openData,
+            String openName,
+            CancellationToken token,
+            Consumer<String> log,
+            DoubleConsumer progress) {
 
         log.accept(String.format("Pooling %d image(s)…", images.size()));
         PooledData pooled = poolAllCells(
-                project, images, markers, classFilter, normalizer, batchShifts, openData, openName, token, log);
+                project,
+                images,
+                markers,
+                classFilter,
+                annotationKeywords,
+                normalizer,
+                batchShifts,
+                openData,
+                openName,
+                token,
+                log);
 
         if (pooled.cancelled() || (token != null && token.isCancelled())) {
             log.accept("Cancelled during pooling — no images written.");

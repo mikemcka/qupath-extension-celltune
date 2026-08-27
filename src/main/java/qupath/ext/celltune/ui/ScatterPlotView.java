@@ -44,6 +44,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import qupath.ext.celltune.BatchCorrection;
 import qupath.ext.celltune.model.AnnRecallException;
+import qupath.ext.celltune.model.AnnotationCellFilter;
 import qupath.ext.celltune.model.CellFeatureExtractor;
 import qupath.ext.celltune.model.CohortClusterModel;
 import qupath.ext.celltune.model.FeatureNormalizer;
@@ -479,11 +480,13 @@ public class ScatterPlotView {
         });
 
         annotationField = new TextField();
-        annotationField.setPromptText("name (blank = all cells)");
+        annotationField.setPromptText("names, comma-separated (blank = all cells)");
         annotationField.setPrefWidth(150);
         annotationField.setTooltip(
                 new javafx.scene.control.Tooltip("Only cluster cells whose centroid falls inside an annotation "
-                        + "whose name (or classification) contains this text. "
+                        + "whose name (or classification) contains one of these comma-separated "
+                        + "keywords, e.g. \"Tumour, Stroma\". Works in both current-image and "
+                        + "project scope (each image is filtered by its own annotations). "
                         + "Leave blank to use all cells."));
         annotationField.setOnAction(e -> recompute()); // Enter re-runs
 
@@ -1298,9 +1301,10 @@ public class ScatterPlotView {
         boolean annoFilter = annoKeyword != null && !annoKeyword.isBlank();
         boolean classFilter = classKeyword != null && !classKeyword.isBlank();
 
-        // Project scope: annotations belong to one image's hierarchy, so the only
-        // filter that applies across a pooled cohort sample is the within-class
-        // one, tested against each row's carried class.
+        // Project scope: the pooled sample rows carry no ROI, so the annotation
+        // filter cannot be applied here — it is applied per-image at sample/pool
+        // time (CohortClusterModel.sample / poolAllCells). The only post-pool
+        // filter is the within-class one, tested against each row's carried class.
         if (scope == Scope.PROJECT) {
             if (!classFilter) {
                 return identityIndices(n);
@@ -1320,20 +1324,12 @@ public class ScatterPlotView {
             return identityIndices(n);
         }
 
-        // Matching annotation ROIs (only needed for the annotation filter).
+        // Matching annotation ROIs (only needed for the annotation filter). Supports a
+        // comma-separated collection of keywords, matched name-or-class case-insensitively.
         List<ROI> rois = new ArrayList<>();
         if (annoFilter && hierarchy != null) {
-            String kw = annoKeyword.trim().toLowerCase();
-            for (PathObject anno : hierarchy.getAnnotationObjects()) {
-                ROI roi = anno.getROI();
-                if (roi == null) {
-                    continue;
-                }
-                String label = annotationLabel(anno);
-                if (label != null && label.toLowerCase().contains(kw)) {
-                    rois.add(roi);
-                }
-            }
+            rois = AnnotationCellFilter.matchingAnnotationRois(
+                    hierarchy, AnnotationCellFilter.parseKeywords(annoKeyword));
             if (rois.isEmpty()) {
                 return new int[0];
             }
@@ -1348,23 +1344,8 @@ public class ScatterPlotView {
                     continue;
                 }
             }
-            if (annoFilter) {
-                ROI cr = cells[i].getROI();
-                if (cr == null) {
-                    continue;
-                }
-                double cx = cr.getCentroidX();
-                double cy = cr.getCentroidY();
-                boolean inside = false;
-                for (ROI r : rois) {
-                    if (r.contains(cx, cy)) {
-                        inside = true;
-                        break;
-                    }
-                }
-                if (!inside) {
-                    continue;
-                }
+            if (annoFilter && !AnnotationCellFilter.centroidInAny(cells[i], rois)) {
+                continue;
             }
             idx.add(i);
         }
@@ -1389,22 +1370,6 @@ public class ScatterPlotView {
             return "annotation “" + annoKeyword.trim() + "”";
         }
         return "all cells";
-    }
-
-    /** Annotation display label: explicit name, else PathClass name, else null. */
-    private static String annotationLabel(PathObject anno) {
-        String name = anno.getName();
-        if (name != null && !name.isBlank()) {
-            return name;
-        }
-        PathClass pc = anno.getPathClass();
-        if (pc != null) {
-            String pcName = pc.getName();
-            if (pcName != null && !pcName.isBlank()) {
-                return pcName;
-            }
-        }
-        return null;
     }
 
     // ── Apply clusters → QuPath classifications ─────────────────────────────────
@@ -2131,6 +2096,8 @@ public class ScatterPlotView {
         final boolean pcaEnabled = pcaEnabledCheck.isSelected();
         final int pcaMaxComponents = pcaComponentsSpinner.getValue();
         final String classFilter = fitClassFilter;
+        // Read the annotation filter on the FX thread; empty = cluster all cells.
+        final List<String> annoKeywords = AnnotationCellFilter.parseKeywords(annotationField.getText());
         final CohortClusterModel.CancellationToken token = new CohortClusterModel.CancellationToken();
         allCellsToken = token;
 
@@ -2191,6 +2158,7 @@ public class ScatterPlotView {
                                         pcaEnabled,
                                         pcaMaxComponents,
                                         classFilter,
+                                        annoKeywords,
                                         normalizer,
                                         BatchCorrection.loadIfEnabled(project),
                                         openData,
@@ -2494,14 +2462,14 @@ public class ScatterPlotView {
 
     /**
      * Applies scope-specific control state on top of the enabled baseline: in
-     * project scope the annotation filter is meaningless (annotations live in one
-     * image's hierarchy) so it is disabled, the Images… button is shown, and the
-     * apply button reads as a cohort-wide assign. The Sample cap + Re-sample stay
-     * visible in both scopes.
+     * project scope the Images… button is shown and the apply button reads as a
+     * cohort-wide assign. The annotation filter is available in BOTH scopes — in
+     * project scope it is applied per-image at sample/pool time (each image is
+     * filtered by its own annotations). The Sample cap + Re-sample stay visible in
+     * both scopes.
      */
     private void applyScopeOverrides() {
         boolean project = scope == Scope.PROJECT;
-        annotationField.setDisable(project);
         projectControls.setVisible(project);
         applyClustersBtn.setText(project ? "Assign Clusters…" : "Apply Clusters…");
         // In project scope "By cluster" writes + saves the Cluster measurement across all
@@ -2707,6 +2675,8 @@ public class ScatterPlotView {
         }
         final List<String> images = new ArrayList<>(projectImages);
         final int cap = sampleSpinner.getValue();
+        // Read the annotation filter on the FX thread; empty = sample from all cells.
+        final List<String> annoKeywords = AnnotationCellFilter.parseKeywords(annotationField.getText());
 
         progress.setVisible(true);
         progress.setProgress(ProgressIndicator.INDETERMINATE_PROGRESS);
@@ -2720,6 +2690,7 @@ public class ScatterPlotView {
                                         project,
                                         images,
                                         markerFeatures,
+                                        annoKeywords,
                                         cap,
                                         normalizer,
                                         msg -> Platform.runLater(() -> statusLabel.setText(msg)));

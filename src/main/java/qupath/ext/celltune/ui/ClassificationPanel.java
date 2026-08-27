@@ -1905,12 +1905,7 @@ public class ClassificationPanel extends VBox {
 
     /** Parse the annotation-keyword text field into a non-null list of trimmed, non-empty keywords. */
     private List<String> parseAnnotationKeywords() {
-        String raw = annotationKeywordField.getText();
-        if (raw == null || raw.isBlank()) return List.of();
-        return Arrays.stream(raw.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toList());
+        return AnnotationCellFilter.parseKeywords(annotationKeywordField.getText());
     }
 
     /**
@@ -1974,14 +1969,7 @@ public class ClassificationPanel extends VBox {
      * PathClass name. Returns null only when both are absent.
      */
     static String annotationDisplayLabel(PathObject anno) {
-        String name = anno.getName();
-        if (name != null && !name.isBlank()) return name;
-        var pc = anno.getPathClass();
-        if (pc != null) {
-            String pcName = pc.getName();
-            if (pcName != null && !pcName.isBlank()) return pcName;
-        }
-        return null;
+        return AnnotationCellFilter.displayLabel(anno);
     }
 
     private static void addPredictionsToSamplingPool(
