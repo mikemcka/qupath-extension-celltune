@@ -42,6 +42,7 @@ import javafx.stage.Stage;
 import javax.imageio.ImageIO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import qupath.ext.celltune.BatchCorrection;
 import qupath.ext.celltune.model.AnnRecallException;
 import qupath.ext.celltune.model.CellFeatureExtractor;
 import qupath.ext.celltune.model.CohortClusterModel;
@@ -2191,6 +2192,7 @@ public class ScatterPlotView {
                                         pcaMaxComponents,
                                         classFilter,
                                         normalizer,
+                                        BatchCorrection.loadIfEnabled(project),
                                         openData,
                                         openName,
                                         token,

@@ -10,6 +10,7 @@ import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
+import qupath.ext.celltune.BatchCorrection;
 import qupath.ext.celltune.CellTuneExtension;
 import qupath.ext.celltune.classifier.DataPoolingService;
 import qupath.ext.celltune.classifier.DualModelClassifier;
@@ -23,6 +24,7 @@ import qupath.ext.celltune.io.GroundTruthIO;
 import qupath.ext.celltune.io.ProjectStateManager;
 import qupath.ext.celltune.io.TrainingLogRecorder;
 import qupath.ext.celltune.model.*;
+import qupath.ext.celltune.model.BatchShifts;
 import qupath.ext.celltune.model.FeatureNormalizer;
 import qupath.ext.celltune.util.TrainingThreads;
 import qupath.fx.dialogs.Dialogs;
@@ -918,6 +920,18 @@ public class ClassificationPanel extends VBox {
                             ProjectStateManager.backupLabels(projectRef, backupImageName, storeCopy);
                         }
 
+                        // UniFORM batch correction (streamed): when the toggle is on and the
+                        // project has a fit, each per-image extractor multiplies its cells'
+                        // measurements by that image's per-channel gain before use. Loaded once;
+                        // applied per image at every extraction seam (current, pooled, inference).
+                        final BatchShifts trainBatchShifts = BatchCorrection.loadIfEnabled(projectRef);
+                        final String currentImgName = (projectRef != null && projectRef.getEntry(imageData) != null)
+                                ? projectRef.getEntry(imageData).getImageName()
+                                : null;
+                        if (trainBatchShifts != null) {
+                            trainLog.accept("Batch correction ON — streaming per-image gains into training.");
+                        }
+
                         // Pool labelled cells from other project images. These are
                         // real cells carrying the full feature panel, extracted RAW
                         // (the classifier trains on raw values — normalisation is a
@@ -927,7 +941,7 @@ public class ClassificationPanel extends VBox {
                         List<String> pooledLabels = null;
                         if (poolAllImages && projectRef != null) {
                             var pooled = TrainingOrchestrator.poolLabelsFromOtherImages(
-                                    projectRef, imageData, scope, finalFeatureNames, null, trainLog);
+                                    projectRef, imageData, scope, finalFeatureNames, null, trainBatchShifts, trainLog);
                             pooledRows = pooled.rows();
                             pooledLabels = pooled.labels();
                         }
@@ -965,6 +979,7 @@ public class ClassificationPanel extends VBox {
                         if (autoPruneEnabled) {
                             List<float[]> pruneRows = new ArrayList<>();
                             CellFeatureExtractor fullExtractor = new CellFeatureExtractor(finalFeatureNames);
+                            BatchCorrection.applyTo(fullExtractor, trainBatchShifts, currentImgName);
                             var labelMap = storeCopy.getAllLabels();
                             for (PathObject cell : detections) {
                                 if (labelMap.containsKey(cell.getID().toString())) {
@@ -1036,6 +1051,7 @@ public class ClassificationPanel extends VBox {
                         // Classifier trains on RAW values (tree models are invariant to the
                         // arcsinh/sqrt monotone transforms; normalisation is clustering-only).
                         CellFeatureExtractor extractor = new CellFeatureExtractor(effectiveFeatureNames);
+                        BatchCorrection.applyTo(extractor, trainBatchShifts, currentImgName);
 
                         classifier.trainAndPredict(
                                 detections,
@@ -1123,7 +1139,8 @@ public class ClassificationPanel extends VBox {
                                     workers,
                                     classifier,
                                     classifier.getFeatureNames(),
-                                    null, // raw inference — classifier is raw-only
+                                    null, // raw inference — classifier is raw-only (batch gain applied separately)
+                                    trainBatchShifts,
                                     this,
                                     trainLog);
                         }
