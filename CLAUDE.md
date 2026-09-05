@@ -17,7 +17,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 chmod +x gradlew
 ./gradlew clean compileJava
 ./gradlew test
-./gradlew shadowJar    # → build/libs/qupath-extension-sp-classify-0.3.0-all.jar
+./gradlew shadowJar    # → build/libs/qupath-extension-sp-classify-0.3.1-all.jar
 ```
 
 ```powershell
