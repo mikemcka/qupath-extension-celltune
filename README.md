@@ -1,8 +1,11 @@
 # SP Classify for QuPath
 
 [![DOI](https://zenodo.org/badge/1214148430.svg)](https://doi.org/10.5281/zenodo.21782421)
+[![Docs](https://img.shields.io/badge/docs-mkdocs--material-blue)](https://mikemcka.github.io/qupath-extension-sp-classify/)
 
 ## This java extension provides similar functionality as parts of CellTune by the Keren Lab in QuPath. If you use this tool for your analysis please also cite [the CellTune paper](https://doi.org/10.1038/s41592-026-03162-2).
+
+📖 **Full documentation: [mikemcka.github.io/qupath-extension-sp-classify](https://mikemcka.github.io/qupath-extension-sp-classify/)**
 
 A [QuPath](https://qupath.github.io/) 0.7 extension that brings **human in the loop ative learning** to cell classification. It trains two gradient-boosted models (XGBoost + LightGBM) simultaneously, identifies cells where the models disagree, and presents those disputed cells for human review — creating an iterative loop that progressively improves classification accuracy.
 
