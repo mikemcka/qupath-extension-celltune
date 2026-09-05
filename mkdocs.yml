@@ -1,0 +1,87 @@
+site_name: SP Classify for QuPath
+site_description: A human-in-the-loop active-learning cell classifier extension for QuPath.
+site_url: https://mikemcka.github.io/qupath-extension-sp-classify/
+repo_url: https://github.com/mikemcka/qupath-extension-sp-classify
+repo_name: mikemcka/qupath-extension-sp-classify
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; 2026 mikemcka — GPL-3.0-only
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+  - glightbox
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Install & launch: install.md
+      - Quick start — multi-class: quickstart-multiclass.md
+      - Quick start — binary + composite: quickstart-binary.md
+      - Setup steps: setup.md
+  - Workflows:
+      - Multi-class in detail: multiclass.md
+      - Binary + composite in detail: binary-composite.md
+      - Review mode: review-mode.md
+  - Analysis:
+      - Project prediction summary: prediction-summary.md
+      - Intensity heatmaps: intensity-heatmaps.md
+      - Distance measurements: distance-measurements.md
+      - Scatter plot, clustering & gating: scatter-clustering.md
+      - Cellular neighborhoods: neighborhoods.md
+      - Batch normalisation (UniFORM): batch-normalisation.md
+      - Image pixel prescreen: pixel-prescreen.md
+  - Reference:
+      - Exporting results: exporting.md
+      - Utility scripts: utility-scripts.md
+      - Sidebar settings: sidebar-reference.md
+      - Menu items: menu-reference.md
+      - Project directory layout: project-layout.md
+      - Marker table format: marker-table.md
+      - How to cite: how-to-cite.md
+      - Tips & limitations: tips.md

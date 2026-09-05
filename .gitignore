@@ -1,5 +1,5 @@
-# Javadocs
-docs/
+# MkDocs build output (the docs/ source tree IS tracked)
+/site/
 
 # Maven
 deploy/
