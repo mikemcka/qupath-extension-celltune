@@ -19,8 +19,8 @@ authors:
 # Concept DOI — always resolves to the latest release. Use this rather than a
 # version-specific DOI so citations do not go stale.
 doi: 10.5281/zenodo.21782421
-version: 0.2.7
-date-released: "2026-08-14"
+version: 0.3.1
+date-released: "2026-09-05"
 license: GPL-3.0-only
 repository-code: "https://github.com/mikemcka/qupath-extension-sp-classify"
 keywords:

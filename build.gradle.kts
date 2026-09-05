@@ -12,7 +12,7 @@ plugins {
 qupathExtension {
     name = "qupath-extension-sp-classify"
     group = "io.github.qupath"
-    version = "0.3.0"
+    version = "0.3.1"
     description = "CellTune-style active learning cell classifier for QuPath"
     automaticModule = "io.github.qupath.extension.spclassify"
 }
