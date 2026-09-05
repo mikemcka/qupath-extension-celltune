@@ -1,0 +1,9 @@
+CellType,Marker1,Marker2,Marker3,Marker4,Marker5
+CD4T,CD4,CD3,,,
+CD8T,CD8,CD3,,,
+Treg,CD4,CD25,FOXP3,CD3,
+Bcell,CD20,CD19,,,
+Macrophage,CD68,CD163,CD11b,,
+NK,CD56,CD16,,,
+DC,CD11c,HLA-DR,,,
+Tumour,PanCK,Ki67,,,

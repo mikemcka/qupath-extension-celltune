@@ -1,6 +1,6 @@
 {
-  "title": "CellTune: an active-learning cell classifier extension for QuPath",
-  "description": "<p>A QuPath extension for classifying cells in highly multiplexed images. It trains two different gradient-boosted models on manually labelled cells, then uses their disagreement to pick the most informative cells for you to review next, so a usable classifier can be built from a few hundred labels rather than thousands.</p><p>Also includes marker-based gating, composite multi-marker rules, project-wide clustering (k-means and Leiden), cellular-neighborhood analysis, intensity heatmaps, spatial distance measurements and whole-image QC.</p><p>Provides similar functionality to parts of CellTune by the Keren Lab. If you use this tool, please also cite the CellTune preprint (doi:10.1101/2025.05.05.652215).</p>",
+  "title": "SP Classify: an active-learning cell classifier extension for QuPath",
+  "description": "<p>A QuPath extension for classifying cells in highly multiplexed images. It trains two different gradient-boosted models on manually labelled cells, then uses their disagreement to pick the most informative cells for you to review next, so a usable classifier can be built from a few hundred labels rather than thousands.</p><p>Also includes marker-based gating, composite multi-marker rules, project-wide clustering (k-means and Leiden), cellular-neighborhood analysis, intensity heatmaps, spatial distance measurements and whole-image QC.</p><p>Provides similar functionality to parts of CellTune by the Keren Lab. If you use this tool, please also cite the CellTune paper (doi:10.1038/s41592-026-03162-2).</p>",
   "upload_type": "software",
   "license": "GPL-3.0-only",
   "creators": [
@@ -22,7 +22,7 @@
   ],
   "related_identifiers": [
     {
-      "identifier": "10.1101/2025.05.05.652215",
+      "identifier": "10.1038/s41592-026-03162-2",
       "relation": "isDerivedFrom",
       "scheme": "doi"
     }

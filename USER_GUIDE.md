@@ -47,10 +47,10 @@ Windows and boxes can be expanded or contracted by clicking and dragging corners
     - [13.3 Delete Measurements by Keyword](#133-delete-measurements-by-keyword)
     - [13.4 Import GeoJSON Objects](#134-import-geojson-objects)
     - [13.5 Export Annotation Regions](#135-export-annotation-regions)
-    - [13.6 Reset CellTune Project State](#136-reset-celltune-project-state)
+    - [13.6 Reset Project State](#136-reset-project-state)
 14. [Reference: every setting in the sidebar](#14-reference-every-setting-in-the-sidebar)
     - [14.1 Reference: preferences](#141-reference-preferences)
-15. [Reference: every CellTune menu item](#15-reference-every-celltune-menu-item)
+15. [Reference: every SP Classify menu item](#15-reference-every-sp-classify-menu-item)
 16. [Project directory layout](#16-project-directory-layout)
 17. [Image pixel prescreen (whole-image QC)](#17-image-pixel-prescreen-whole-image-qc-no-cells-needed)
 18. [Cellular neighborhoods (spatial micro-environments)](#18-cellular-neighborhoods-spatial-micro-environments)
@@ -74,12 +74,12 @@ Windows and boxes can be expanded or contracted by clicking and dragging corners
 
 ## 1. Install & launch
 
-1. **Download** `qupath-extension-celltune-0.3.0-all.jar` from the [Releases page](https://github.com/mikemcka/qupath_extension_celltune/releases), or build it from source — see [CLAUDE.md](CLAUDE.md#build--test).
+1. **Download** `qupath-extension-sp-classify-0.3.0-all.jar` from the [Releases page](https://github.com/mikemcka/qupath-extension-sp-classify/releases), or build it from source — see [CLAUDE.md](CLAUDE.md#build--test).
 2. Drop the JAR into QuPath's `extensions/` folder, or drag-and-drop it onto the running QuPath window.
-3. Restart QuPath. The **CellTune Classifier** panel docks into the analysis tab pane on the right, you can mouse over the area and scroll the mouse wheel to uncover it.
-4. Some commands also live under the **Extensions → CellTune Classifier** menu.
+3. Restart QuPath. The **SP Classify** panel docks into the analysis tab pane on the right, you can mouse over the area and scroll the mouse wheel to uncover it.
+4. Some commands also live under the **Extensions → SP Classify** menu.
 
-Disable the extension at any time from **Edit → Preferences → CellTune Classifier → Enable**.
+Disable the extension at any time from **Edit → Preferences → SP Classify → Enable**.
 
 ![Docked side panel](doc_images/docked_side_panel.png)
 
@@ -150,7 +150,7 @@ Detail per step is in §[6](#6-binary--composite-workflow-in-detail).
 
 ### 4.1 Select features
 
-**Menu:** *Extensions → CellTune Classifier → Select Features...*
+**Menu:** *Extensions → SP Classify → Select Features...*
 
 QuPath cell-detection panels (COMET, MIBI, IMC, CODEX) often produce 1000–2000 measurement columns per cell. The extension lets you pick a subset for training; the rest are ignored.
 
@@ -187,7 +187,7 @@ Your selection is saved in `<project>/celltune/classifier-state.json` and persis
 
 ### 4.2 Clustering normalisation
 
-**Menu:** *Extensions → CellTune Classifier → Clustering Normalisation*
+**Menu:** *Extensions → SP Classify → Clustering Normalisation*
 
 Per-feature transforms for the **clustering / scatter-plot / gating** workflows. **The classifier always trains and predicts on raw values** — normalisation configured here does not touch the phenotyping model (tree models are invariant to it anyway). Same prefix/search/select-all UI as Select Features, plus:
 
@@ -209,7 +209,7 @@ You pick **which** features to transform and **one** transform/cofactor applied 
 Two things it does **not** do:
 
 - **It never touches the classifier.** The phenotyping model always trains and predicts on **raw** values — normalisation is applied only in the clustering path. (Even if it were applied, XGBoost / LightGBM / Random Forest split on rank order and arcsinh is a strictly increasing rescale, so predictions would be unchanged at any cofactor.) Auto-prune, feature-importance/SHAP, and ground-truth export all operate on the same raw values the model sees; export no longer writes `__norm` columns.
-- **It does not correct slide-to-slide (batch) differences, so it does not improve generalisation to unseen slides.** The same global transform is applied identically to every image, so it uses no per-image information and cannot remove per-slide staining/exposure offsets. Generalising across variable samples is a **batch-correction** problem (per-image or reference-based alignment) plus annotating a **diversity** of slides — not something arcsinh addresses. CellTune provides per-image batch correction via UniFORM: see §[19](#19-batch-normalisation-uniform).
+- **It does not correct slide-to-slide (batch) differences, so it does not improve generalisation to unseen slides.** The same global transform is applied identically to every image, so it uses no per-image information and cannot remove per-slide staining/exposure offsets. Generalising across variable samples is a **batch-correction** problem (per-image or reference-based alignment) plus annotating a **diversity** of slides — not something arcsinh addresses. SP Classify provides per-image batch correction via UniFORM: see §[19](#19-batch-normalisation-uniform).
 
 **What this pane configures vs. what clustering always does.** The arcsinh/sqrt transform here is only **stage 1** of the clustering normalisation, and it is **optional** — leave it off and clustering still runs. The full pipeline every clustering fit applies is:
 
@@ -225,7 +225,7 @@ So configuring arcsinh here is the optional stage-1 *dynamic-range compressor* t
 
 ### 4.3 Create classes & Class Control
 
-**Menu:** *Extensions → CellTune Classifier → Class Control...*
+**Menu:** *Extensions → SP Classify → Class Control...*
 
 A 4-tab dialog for managing the QuPath class panel **and** the labels saved on disk under `<project>/celltune/image-labels/`.
 
@@ -247,7 +247,7 @@ Type a class name, click **Add Class**. Just adds it to QuPath's class panel —
 
 ### 4.4 Import a marker table (auto channel switching)
 
-**Menu:** *Extensions → CellTune Classifier → Import ▸ Marker Table...*
+**Menu:** *Extensions → SP Classify → Import ▸ Marker Table...*
 
 Optional. Maps cell types to marker channels so review mode can auto-switch channel visibility to the markers relevant to each predicted cell.
 
@@ -365,7 +365,7 @@ The training log tells you what each model actually used: `best round 127/500` m
 
 Click **Train**. A progress dialog shows the current step (feature extraction, balancing, fold training, etc.). Before training starts, a timestamped backup of the label store is written to `<project>/celltune/labels_backup_*.json`.
 
-**Before it starts**, CellTune checks whether you have enough memory. If it looks tight, you get a warning with a Proceed/Cancel choice — cancelling now is cheaper than running out of memory twenty minutes in. It's a rough check, so it catches obvious problems rather than guaranteeing success.
+**Before it starts**, SP Classify checks whether you have enough memory. If it looks tight, you get a warning with a Proceed/Cancel choice — cancelling now is cheaper than running out of memory twenty minutes in. It's a rough check, so it catches obvious problems rather than guaranteeing success.
 
 Status bar after success: `Training complete — 523 cells classified, 47 disagreements.`
 
@@ -463,7 +463,7 @@ Use this when you want **per-marker** classifiers (one for CD3 positive/negative
 
 ### 6.1 Create a binary classifier
 
-**Menu:** *Extensions → CellTune Classifier → Binary Classifiers...*
+**Menu:** *Extensions → SP Classify → Binary Classifiers...*
 
 - **Create...** → enter a marker name (e.g. `CD3`). Marker names are sanitised to safe filesystem characters.
 - The marker is registered in `<project>/celltune/binary-registry.json` and a state file `<project>/celltune/binary/CD3.json` is created when you first train.
@@ -481,7 +481,7 @@ Repeat for every marker you want in the composite.
 
 ### 6.2 Composite classification
 
-**Menu:** *Extensions → CellTune Classifier → Composite Classification...*
+**Menu:** *Extensions → SP Classify → Composite Classification...*
 
 - **Markers** — checkbox per trained binary classifier. **All** / **None** buttons above. Only markers that have been trained (have a saved XGBoost model) appear.
 - **Images** — checkbox per project image. **All** / **None** / **Current only** buttons above.
@@ -548,7 +548,7 @@ After review, click **Train** again — the new labels feed into the next cycle.
 
 ## 8. Project Prediction Summary - Experimental
 
-**Menu:** *Extensions → CellTune Classifier → Project Prediction Summary...*
+**Menu:** *Extensions → SP Classify → Project Prediction Summary...*
 
 Cohort-level QC across every image in your project. Loads the saved `Pred_ALL` results from `<project>/celltune/image-predictions/` and runs an anomaly analysis. See [HOW_IT_WORKS_PREDICTION_SUMMARY](#anatomy-of-the-anomaly-score) below for the maths.
 
@@ -601,7 +601,7 @@ For each image:
 
 ## 9. Intensity heatmaps
 
-**Menu:** *Extensions → CellTune Classifier → Intensity Heatmaps...*
+**Menu:** *Extensions → SP Classify → Intensity Heatmaps...*
 
 A phenotype × marker heatmap of **mean whole-cell intensity per predicted cell class** — the standard "mean marker expression per phenotype" view used to sanity-check that each class actually expresses the markers it should (e.g. CD8⁺ T-cells are high for CD8, Tregs high for FOXP3).
 
@@ -630,7 +630,7 @@ When you open the heatmap you first pick which whole-cell mean measurements to i
 
 ## 10. Distance measurements (spatial analysis)
 
-**Menu:** *Extensions → CellTune Classifier → Generate Distance Measurements...*
+**Menu:** *Extensions → SP Classify → Generate Distance Measurements...*
 
 A project-wide batch tool that adds spatial distance columns to your cell measurements — useful for downstream neighbourhood / spatial-statistics analysis. It runs across as many project images as you select, loading and saving each one for you.
 
@@ -679,7 +679,7 @@ Classes with only a single cell are reported as `Skipping '<class>' (n=1)` for t
 
 ## 11. Cell scatter plot — clustering & gating
 
-**Extensions → CellTune Classifier → Scatter Plots and Clustering...** opens an interactive
+**Extensions → SP Classify → Scatter Plots and Clustering...** opens an interactive
 2D scatter plot for **unsupervised exploration**: cells are clustered — by
 k-means or, optionally, graph-based Leiden clustering (§[11.6](#116-clustering-method-k-means-vs-leiden))
 — on their marker measurements and projected into a 2D embedding so you can see,
@@ -1060,7 +1060,7 @@ populations.
 
 ### 12.1 Cell table export
 
-**Menu:** *Extensions → CellTune Classifier → Export ▸ Cell Table...*
+**Menu:** *Extensions → SP Classify → Export ▸ Cell Table...*
 
 For each selected image, writes `<ImageName>.csv` to your chosen folder with one row per detection:
 
@@ -1084,11 +1084,11 @@ The extension's ground-truth files are a portable representation of your labelle
 
 #### Export
 
-**Menu:** *Extensions → CellTune Classifier → Export ▸ Ground Truth...*
+**Menu:** *Extensions → SP Classify → Export ▸ Ground Truth...*
 
 Header (commented):
 ```
-# CellTune Ground Truth Export
+# SP Classify Ground Truth Export
 # Image: my_image.ome.tiff
 # Exported: 2026-06-02T14:30:45
 Image,Label,CentroidX,CentroidY,Feature1,Feature2,...
@@ -1100,7 +1100,7 @@ In multi-class mode the export pools labels from the current image plus all othe
 
 #### Import
 
-**Menu:** *Extensions → CellTune Classifier → Import ▸ Ground Truth...*
+**Menu:** *Extensions → SP Classify → Import ▸ Ground Truth...*
 
 After picking the CSV you choose one of two modes:
 
@@ -1115,7 +1115,7 @@ The binary equivalents are **Import ▸ Active Binary Ground Truth...** — same
 
 ## 13. Utility scripts
 
-*Extensions → CellTune Classifier → **Utility Scripts***
+*Extensions → SP Classify → **Utility Scripts***
 
 A grab-bag of common housekeeping operations that would otherwise live in one-off Groovy scripts. Each prompts for its parameters and reports what it did.
 
@@ -1145,7 +1145,7 @@ Imports annotations and detections from a `.geojson` (or gzipped `.geojson.gz`) 
 
 Exports one or more annotation ROIs from the **current image** as polygon-**masked** OME-TIFFs — pixels outside the annotation shape are zeroed, so you get the annotation region rather than its rectangular bounding box. Enter a comma-separated list of annotation names (leave blank to export **all** annotations), set the **downsample**, **tile size**, **writer threads**, **compression** (LZW by default), and whether to write **BigTIFF** and a **pyramid**, then choose an output directory. Each region is written to `<image>__<annotation>.ome.tif` on a background thread, and a notification reports how many succeeded. Requires QuPath's built-in Bio-Formats extension (loaded by default).
 
-### 13.6 Reset CellTune Project State
+### 13.6 Reset Project State
 
 > ⚠️ **Destructive.** Permanently deletes everything the extension has saved for this project. Intended for starting over — e.g. when you've **copied a project** to trial different ML options and want a clean slate, since the `celltune/` state travels with the copy.
 
@@ -1153,7 +1153,7 @@ Deletes the project's entire `celltune/` folder: all labels and per-image label 
 
 **Safety net:** before deleting anything, a timestamped **`celltune_backup_<timestamp>.zip`** is written to the project folder. To undo a reset, unzip it back into the project folder (recreating `celltune/`). The action is guarded by a typed **`RESET`** confirmation.
 
-**Images and detections are kept.** The extension's ground-truth **label points** and the **cell classifications** (predictions) it paints onto cells live in each image's `.qpdata`, *not* in `celltune/`. They are left in place unless you tick **"Also clear CellTune label points and all cell classifications from every image"**, which strips classified point annotations and clears every cell's classification across **all** project images (this rewrites each image's data and runs on a background thread). Tissue/region annotations and unclassified points are never touched.
+**Images and detections are kept.** The extension's ground-truth **label points** and the **cell classifications** (predictions) it paints onto cells live in each image's `.qpdata`, *not* in `celltune/`. They are left in place unless you tick **"Also clear SP Classify label points and all cell classifications from every image"**, which strips classified point annotations and clears every cell's classification across **all** project images (this rewrites each image's data and runs on a background thread). Tissue/region annotations and unclassified points are never touched.
 
 ---
 
@@ -1188,7 +1188,7 @@ Deletes the project's entire `celltune/` folder: all labels and per-image label 
 
 ### 14.1 Reference: preferences
 
-Under **Edit → Preferences → CellTune Classifier**. These are set once and left alone, which is why they aren't in the sidebar.
+Under **Edit → Preferences → SP Classify**. These are set once and left alone, which is why they aren't in the sidebar.
 
 | Preference | Default | What it does |
 |---|---|---|
@@ -1197,7 +1197,7 @@ Under **Edit → Preferences → CellTune Classifier**. These are set once and l
 
 **XGBoost histogram bins — leave this alone.**
 
-**The default is the most accurate setting. Changing it trades accuracy for speed, and CellTune is built on the assumption that you would rather wait and get the better answer.** The rest of this section is here so you know what the setting is if you meet it — not as a suggestion to change it.
+**The default is the most accurate setting. Changing it trades accuracy for speed, and SP Classify is built on the assumption that you would rather wait and get the better answer.** The rest of this section is here so you know what the setting is if you meet it — not as a suggestion to change it.
 
 *What it is.* The classifier works by asking yes/no questions about one measurement at a time — *"is this cell's CD8 above 412?"* To find a good cut-off it has to try candidates. Trying every value in your data would be exact but painfully slow, so instead it sorts your cells by that measurement, chops them into buckets, and only tries the cut-offs *between* buckets. This setting is how many buckets. The standard 256 gives a possible cut-off at roughly every 0.4% of your cells, which is fine enough that you are unlikely to lose a real boundary.
 
@@ -1207,9 +1207,9 @@ Under **Edit → Preferences → CellTune Classifier**. These are set once and l
 
 ---
 
-## 15. Reference: every CellTune menu item
+## 15. Reference: every SP Classify menu item
 
-All under *Extensions → CellTune Classifier*.
+All under *Extensions → SP Classify*.
 
 | Item | Requires | Action |
 |---|---|---|
@@ -1235,7 +1235,7 @@ All under *Extensions → CellTune Classifier*.
 | Utility Scripts ▸ Import GeoJSON Objects... | Open image | Import objects from a (gzipped) GeoJSON into the current image — **small-to-medium files only**. See §[13.4](#134-import-geojson-objects). |
 | Utility Scripts ▸ Export Annotation Regions... | Open image | Export annotation ROIs from the current image as polygon-masked OME-TIFF(s) — **single-image, small-to-medium**. See §[13.5](#135-export-annotation-regions). |
 | Utility Scripts ▸ Delete Measurements by Keyword... | Open image or project | **Destructive:** delete detection measurements matching a keyword, with preview/confirm. See §[13.3](#133-delete-measurements-by-keyword). |
-| Utility Scripts ▸ Reset CellTune Project State... | Project | **Destructive:** wipe the project's `celltune/` state (labels, models, predictions, settings) for a clean slate; writes a backup zip first, typed-`RESET` confirm, optional per-image artifact stripping. See §[13.6](#136-reset-celltune-project-state). |
+| Utility Scripts ▸ Reset Project State... | Project | **Destructive:** wipe the project's `celltune/` state (labels, models, predictions, settings) for a clean slate; writes a backup zip first, typed-`RESET` confirm, optional per-image artifact stripping. See §[13.6](#136-reset-project-state). |
 
 ---
 
@@ -1274,7 +1274,7 @@ JSON throughout. Model bytes are Base64-encoded inside the state files. Safe to 
 
 ## 17. Image pixel prescreen (whole-image QC, no cells needed) - Experimental
 
-**Menu:** *Extensions → CellTune Classifier → Image Pixel Prescreen...*
+**Menu:** *Extensions → SP Classify → Image Pixel Prescreen...*
 
 A **prescreen you run at the very start of a project** — before any segmentation or
 classification exists. It reads a low-resolution version of every image straight
@@ -1393,7 +1393,7 @@ columns — including `LaplacianVariance` — for every channel in the cohort), 
 
 ## 18. Cellular neighborhoods (spatial micro-environments)
 
-**Menu:** *Extensions → CellTune Classifier → Cellular Neighborhoods...*
+**Menu:** *Extensions → SP Classify → Cellular Neighborhoods...*
 
 Cellular neighborhoods (CNs) group cells not by *what they are* but by *what surrounds them*. Instead of a cell's own phenotype, each cell is described by the **cell-type mixture of its local spatial window**, and those mixture vectors are clustered so the tissue is partitioned into recurring micro-environments — tumour core, tumour–stroma interface, immune niches, and so on. This is the Schürch/Nolan method — Schürch et al., "Coordinated Cellular Neighborhoods Orchestrate Antitumoral Immunity at the Colorectal Cancer Invasive Front," *Cell* 2020 ([full citation & acknowledgement in the README](README.md#acknowledgements)). If you use this feature, please cite that paper.
 
@@ -1526,9 +1526,9 @@ Each toggle flips back to the classification colouring on a second click, and **
 
 ## 19. Batch normalisation (UniFORM)
 
-Multiplex staining varies image-to-image — the same marker can sit at a different intensity on different slides or runs. **Batch normalisation** aligns each image's marker-intensity distribution to a common reference so that clustering and the classifier see one consistent intensity scale across a cohort, instead of learning the batch. CellTune implements the **feature-level UniFORM** method (Wang et al., *Cell Reports Methods* 2025; see [README ▸ References](README.md#references)): for each marker it aligns per-image log-intensity histograms by the rigid shift that best matches a reference, and that shift maps back to a single per-image multiplicative **gain** per channel. Because it is a translation in log-space, the distribution's *shape* is preserved — only its location moves — so it is conservative about erasing real biology.
+Multiplex staining varies image-to-image — the same marker can sit at a different intensity on different slides or runs. **Batch normalisation** aligns each image's marker-intensity distribution to a common reference so that clustering and the classifier see one consistent intensity scale across a cohort, instead of learning the batch. SP Classify implements the **feature-level UniFORM** method (Wang et al., *Cell Reports Methods* 2025; see [README ▸ References](README.md#references)): for each marker it aligns per-image log-intensity histograms by the rigid shift that best matches a reference, and that shift maps back to a single per-image multiplicative **gain** per channel. Because it is a translation in log-space, the distribution's *shape* is preserved — only its location moves — so it is conservative about erasing real biology.
 
-Open it from **Extensions ▸ CellTune Classifier ▸ Batch Normalisation…**.
+Open it from **Extensions ▸ SP Classify ▸ Batch Normalisation…**.
 
 > The gain is computed from each channel's **Cell: Mean** intensities and then applied to every statistic of that channel. Only intensity measurements are corrected; foundation-model embeddings are excluded. Nothing is overwritten unless you explicitly write columns — see §19.4.
 
@@ -1540,7 +1540,7 @@ Open it from **Extensions ▸ CellTune Classifier ▸ Batch Normalisation…**.
 ### 19.2 Fitting — step by step
 
 1. **Correct measurements** — *Choose measurements…* picks the marker intensities to align (embeddings are excluded automatically).
-2. **Images** — *Choose images…* picks the cohort. *Also include projects ▸ Add project…* pools images from other CellTune projects into the same fit (they must share the marker/measurement names); *Clear* resets.
+2. **Images** — *Choose images…* picks the cohort. *Also include projects ▸ Add project…* pools images from other SP Classify projects into the same fit (they must share the marker/measurement names); *Clear* resets.
 3. **Batch grouping** (optional) — *Assign batches…* opens an Image → Batch table. Assign by double-clicking a cell, selecting rows → *Assign selected → batch…*, **Auto-detect from name**, or **Load CSV…**. The grouping drives per-batch mode and the QC view.
 4. **Granularity** —
    - **Per image** — each image is aligned to the reference independently (finest correction).
@@ -1578,7 +1578,7 @@ Two independent options:
 - **Pick different model types for Model 1 and Model 2.** Two XGBoosts won't disagree much, which kills the whole point.
 - **Images at once caps at 8.** Expect ~2–4 GB of memory per image on COMET data. It's a different thing from **CPU threads** — see §5.3.
 - **If training feels slow, read the log first.** Every run ends with a "Where the time went" table in `<project>/celltune/logs/`. It tells you which step to actually do something about instead of guessing.
-- **The marker table persists per project.** On import it's saved to `<project>/celltune/marker-table.json` and reloaded automatically when you reopen the project, so auto-channel-switching during review survives QuPath restarts — no re-import needed. (*Reset CellTune project state* clears it along with the rest of the `celltune/` folder.)
+- **The marker table persists per project.** On import it's saved to `<project>/celltune/marker-table.json` and reloaded automatically when you reopen the project, so auto-channel-switching during review survives QuPath restarts — no re-import needed. (*Reset Project State* clears it along with the rest of the `celltune/` folder.)
 - **Project Prediction Summary needs ≥5 images** to give meaningful robust z-scores. On 2–3 image projects, treat the Anomaly column as overview or guide.
 - **Composite class colours.** Without "Prepend primary", QuPath generates a colour per unique composite name — you can end up with hundreds. Tick "Prepend primary" and your existing multi-class palette is preserved.
 - **No `.qpdata` save** when navigating from Project Prediction Summary — this is deliberate (saving large slides is slow and pointless for navigation). Manually save the image after editing it.
