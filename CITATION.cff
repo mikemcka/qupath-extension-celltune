@@ -1,6 +1,10 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it as below. Please also cite the CellTune preprint (doi:10.1101/2025.05.05.652215)."
-title: "CellTune: an active-learning cell classifier extension for QuPath"
+message: >-
+  If you use this software, please cite it as below. Please also cite the CellTune
+  paper (doi:10.1038/s41592-026-03162-2), whose human-in-the-loop workflow this
+  extension derives functions from. Depending on which features you use, please
+  also cite the relevant method papers listed under "references".
+title: "SP Classify: an active-learning cell classifier extension for QuPath"
 abstract: >-
   A QuPath extension for classifying cells in highly multiplexed images. It trains two
   different gradient-boosted models on manually labelled cells, then uses their disagreement
@@ -18,7 +22,7 @@ doi: 10.5281/zenodo.21782421
 version: 0.2.7
 date-released: "2026-08-14"
 license: GPL-3.0-only
-repository-code: "https://github.com/mikemcka/qupath-extension-celltune"
+repository-code: "https://github.com/mikemcka/qupath-extension-sp-classify"
 keywords:
   - QuPath
   - multiplexed imaging
@@ -28,3 +32,97 @@ keywords:
   - image analysis
   - machine learning
   - bioimage analysis
+# Method papers whose algorithms this extension reimplements. Cite the ones whose
+# corresponding feature you actually use in your analysis.
+references:
+  - type: article
+    title: "CellTune"
+    notes: "The human-in-the-loop cell classification workflow this extension derives functions from (Keren Lab). Cite whenever you use this extension."
+    authors:
+      - name: "Keren Lab"
+    doi: 10.1038/s41592-026-03162-2
+    journal: "Nature Methods"
+    year: 2026
+  - type: article
+    title: "Coordinated Cellular Neighborhoods Orchestrate Antitumoral Immunity at the Colorectal Cancer Invasive Front"
+    notes: "Cite if you use the Cellular Neighborhoods (CN) analysis."
+    authors:
+      - family-names: "Schürch"
+        given-names: "Christian M."
+      - family-names: "Bhate"
+        given-names: "Salil S."
+      - family-names: "Barlow"
+        given-names: "Graham L."
+    doi: 10.1016/j.cell.2020.07.005
+    journal: "Cell"
+    volume: 182
+    issue: 5
+    year: 2020
+  - type: article
+    title: "From Louvain to Leiden: guaranteeing well-connected communities"
+    notes: "Cite if you use graph-based (Leiden) clustering."
+    authors:
+      - family-names: "Traag"
+        given-names: "Vincent A."
+      - family-names: "Waltman"
+        given-names: "Ludo"
+      - family-names: "van Eck"
+        given-names: "Nees Jan"
+    doi: 10.1038/s41598-019-41695-z
+    journal: "Scientific Reports"
+    volume: 9
+    year: 2019
+  - type: article
+    title: "SCANPY: large-scale single-cell gene expression data analysis"
+    notes: "Cite if graph-based clustering (which mirrors the scanpy recipe) is central to your analysis."
+    authors:
+      - family-names: "Wolf"
+        given-names: "F. Alexander"
+      - family-names: "Angerer"
+        given-names: "Philipp"
+      - family-names: "Theis"
+        given-names: "Fabian J."
+    doi: 10.1186/s13059-017-1382-0
+    journal: "Genome Biology"
+    volume: 19
+    year: 2018
+  - type: article
+    title: "Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs"
+    notes: "Cite if you use cohort/all-cells Leiden clustering (which builds an HNSW kNN graph)."
+    authors:
+      - family-names: "Malkov"
+        given-names: "Yu A."
+      - family-names: "Yashunin"
+        given-names: "Dmitry A."
+    doi: 10.1109/TPAMI.2018.2889473
+    journal: "IEEE Transactions on Pattern Analysis and Machine Intelligence"
+    volume: 42
+    issue: 4
+    year: 2020
+  - type: article
+    title: "Single-cell metabolic profiling of human cytotoxic T cells"
+    notes: "Cite if you use the recommended arcsinh cofactor (0.05) for MIBI mass-spectrometry data."
+    authors:
+      - family-names: "Hartmann"
+        given-names: "Felix J."
+      - family-names: "Mrdjen"
+        given-names: "Dunja"
+      - family-names: "McCaffrey"
+        given-names: "Erin"
+    doi: 10.1038/s41587-020-0651-8
+    journal: "Nature Biotechnology"
+    volume: 39
+    year: 2021
+  - type: article
+    title: "UniFORM: Towards Universal Immunofluorescence Normalization for Multiplex Tissue Imaging"
+    notes: "Cite if you use the Batch Normalisation (UniFORM) feature."
+    authors:
+      - family-names: "Wang"
+        given-names: "Kunlun"
+      - family-names: "Ait-Ahmad"
+        given-names: "Karim"
+      - family-names: "Kupp"
+        given-names: "Sara"
+    doi: 10.1101/2024.12.06.626879
+    journal: "bioRxiv"
+    year: 2024
